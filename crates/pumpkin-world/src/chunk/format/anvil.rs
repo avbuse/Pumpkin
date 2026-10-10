@@ -37,8 +37,8 @@ pub const CHUNK_COUNT: usize = REGION_SIZE * REGION_SIZE;
 /// The number of bytes in a sector (4 KiB)
 const SECTOR_BYTES: usize = 4096;
 
-// 26.2
-pub const WORLD_DATA_VERSION: i32 = 4903;
+// 5023 is the 26.3 data version.
+pub const WORLD_DATA_VERSION: i32 = 5023;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1352,7 +1352,9 @@ mod tests {
  */
 #[cfg(test)]
 mod tests {
-    use super::{AnvilChunkFile, Compression, CompressionError, SECTOR_BYTES};
+    use super::{
+        AnvilChunkFile, Compression, CompressionError, SECTOR_BYTES, SingleChunkDataSerializer,
+    };
     use crate::chunk::ChunkData;
     use crate::chunk::io::ChunkSerializer;
     use bytes::{BufMut, Bytes, BytesMut};
@@ -1431,5 +1433,34 @@ mod tests {
             Compression::Custom.decompress_data(b"chunk data"),
             Err(CompressionError::UnknownCompression)
         ));
+    }
+
+    fn written_data_version(bytes: &[u8]) -> i32 {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let mut reader = pumpkin_nbt::deserializer::NbtReadHelperJava::new(&mut cursor);
+        let nbt = pumpkin_nbt::Nbt::read(&mut reader).expect("written chunk NBT");
+        nbt.get_int("DataVersion")
+            .expect("written chunk has DataVersion")
+    }
+
+    #[test]
+    fn written_chunks_advertise_data_version_5023() {
+        use std::sync::atomic::AtomicBool;
+
+        use crate::chunk::ChunkEntityData;
+
+        let chunk = ChunkData::empty(3, -2);
+        let bytes = SingleChunkDataSerializer::to_bytes(&chunk).expect("serialize chunk");
+        assert_eq!(written_data_version(&bytes), 5023);
+
+        let entities = ChunkEntityData {
+            x: 3,
+            z: -2,
+            data: std::sync::Mutex::new(Vec::new()),
+            live: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
+        };
+        let bytes = SingleChunkDataSerializer::to_bytes(&entities).expect("serialize entities");
+        assert_eq!(written_data_version(&bytes), 5023);
     }
 }
