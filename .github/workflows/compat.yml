@@ -3,8 +3,10 @@ name: Compatibility smoke
 on:
   push:
     branches:
-      - master
-  pull_request:
+      - core-functionality
+      - enhanced-functionality
+      - "core/**"
+      - "enhanced/**"
   workflow_dispatch:
 
 concurrency:
