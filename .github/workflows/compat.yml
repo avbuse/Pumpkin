@@ -1,0 +1,62 @@
+name: Compatibility smoke
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  smoke:
+    name: Pumpkin login smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug-${{ runner.os }}-${{ runner.arch }}
+      - name: Build the server and the harness
+        run: cargo build -p pumpkin -p pumpkin-compat
+      - name: Harness unit tests
+        run: cargo test -p pumpkin-compat --lib
+      - name: Login, spawn, chunk, place, and break
+        env:
+          PUMPKIN_BIN: ${{ github.workspace }}/target/debug/pumpkin
+        run: cargo test -p pumpkin-compat --test smoke -- pumpkin_smoke --exact --ignored --test-threads=1
+
+  vanilla:
+    name: Vanilla login milestones
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug-${{ runner.os }}-${{ runner.arch }}
+      - name: Build the server and the harness
+        run: cargo build -p pumpkin -p pumpkin-compat
+      - name: Compare login milestones with vanilla
+        env:
+          PUMPKIN_BIN: ${{ github.workspace }}/target/debug/pumpkin
+          PUMPKIN_COMPAT_VANILLA: "1"
+        run: cargo test -p pumpkin-compat --test smoke -- vanilla_milestones --exact --ignored --test-threads=1
