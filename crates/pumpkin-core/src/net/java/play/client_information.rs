@@ -1,6 +1,8 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use crate::net::ParticleStatus;
+
 impl JavaClient {
     pub fn handle_client_information(
         &self,
@@ -57,6 +59,7 @@ impl JavaClient {
                     main_hand,
                     text_filtering: client_information.text_filtering,
                     server_listing: client_information.server_listing,
+                    particle_status: ParticleStatus::from_id(client_information.particle_status.0),
                 };
 
                 // 4. Atomically swap the new config into the player

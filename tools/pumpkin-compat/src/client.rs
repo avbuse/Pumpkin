@@ -27,7 +27,8 @@ use pumpkin_protocol::java::client::status::CStatusResponse;
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
 use pumpkin_protocol::java::server::config::{
-    SAcknowledgeFinishConfig, SClientInformationConfig, SKeepAlive as SConfigKeepAlive, SKnownPacks,
+    PARTICLE_STATUS_ALL, SAcknowledgeFinishConfig, SClientInformationConfig,
+    SKeepAlive as SConfigKeepAlive, SKnownPacks,
 };
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
@@ -38,9 +39,7 @@ use pumpkin_protocol::java::server::play::{
 use pumpkin_protocol::java::server::status::SStatusRequest;
 use pumpkin_protocol::ser::NetworkReadExt;
 use pumpkin_protocol::ser::NetworkWriteExt;
-use pumpkin_protocol::{
-    ClientPacket, ConnectionState, MultiVersionJavaPacket, ServerPacket, VarInt,
-};
+use pumpkin_protocol::{ClientPacket, ConnectionState, ServerPacket, VarInt};
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -68,9 +67,6 @@ enum ConfigProbe {
     /// An id the configuration phase does not dispatch.
     Unknown,
 }
-/// 26.3 `ParticleStatus.ALL`. The client-information codec in this tree stops
-/// before this field, and a vanilla 26.3 server will not decode the packet without it.
-const PARTICLE_STATUS_ALL: u8 = 0;
 
 /// A packet the scenario layer cares about. Protocol obligations (keep-alive,
 /// teleport confirm, chunk-batch ack, compression) are handled before this is
@@ -339,7 +335,7 @@ impl Bot {
     }
 
     async fn send_client_information(&mut self) -> Result<(), Error> {
-        let packet = SClientInformationConfig {
+        self.send_packet(&SClientInformationConfig {
             locale: "en_us",
             view_distance: 8i8,
             chat_mode: VarInt(0),
@@ -348,29 +344,9 @@ impl Bot {
             main_hand: VarInt(1),
             text_filtering: false,
             server_listing: true,
-        };
-        let id = SClientInformationConfig::to_id(self.version);
-        let mut bytes = packet
-            .serialize_packet(&self.version)
-            .map_err(|err| Error::scenario(format!("encode client information: {err}")))?
-            .to_vec();
-        bytes.push(PARTICLE_STATUS_ALL);
-        let payload_len = bytes.len();
-        self.encoder
-            .write_packet(bytes::Bytes::from(bytes))
-            .await
-            .map_err(|err| Error::scenario(format!("write client information: {err}")))?;
-        self.encoder
-            .flush()
-            .await
-            .map_err(|err| Error::scenario(format!("flush client information: {err}")))?;
-        self.trace.push(PacketRecord {
-            direction: Direction::Out,
-            phase: self.phase,
-            id,
-            payload_len,
-        });
-        Ok(())
+            particle_status: VarInt(PARTICLE_STATUS_ALL),
+        })
+        .await
     }
 
     async fn finish_config(&mut self, probe: ConfigProbe) -> Result<(), Error> {

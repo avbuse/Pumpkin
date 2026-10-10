@@ -40,8 +40,8 @@ use tracing::{debug, error, warn};
 use crate::{
     entity::player::ChatMode,
     net::{
-        EncryptionError, GameProfile, PacketHandlerResult, PacketRateLimiter, PlayerConfig,
-        can_not_join,
+        EncryptionError, GameProfile, PacketHandlerResult, PacketRateLimiter, ParticleStatus,
+        PlayerConfig, can_not_join,
     },
     plugin::server::packet::{ConnectionPacketReceivedEvent, ConnectionPacketSentEvent},
     server::Server,
@@ -648,6 +648,7 @@ impl PendingConnection {
                 main_hand,
                 text_filtering: client_information.text_filtering,
                 server_listing: client_information.server_listing,
+                particle_status: ParticleStatus::from_id(client_information.particle_status.0),
             });
         } else {
             self.kick(TextComponent::text("Invalid hand or chat type"))
