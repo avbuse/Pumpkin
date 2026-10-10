@@ -7,6 +7,14 @@ use crate::net::java::JavaClient;
 
 use super::World;
 
+/// Vanilla `WorldBorder.MAX_SIZE`. This is the diameter a world used before a
+/// saved border was applied.
+pub const DEFAULT_DIAMETER: f64 = 5.999_996_8E7;
+pub const DEFAULT_WARNING_BLOCKS: i32 = 5;
+/// Persisted default from `WorldBorder.Settings`. A brand-new live border uses 15.
+pub const DEFAULT_WARNING_TIME: i32 = 300;
+
+#[derive(Clone)]
 pub struct Worldborder {
     pub center_x: f64,
     pub center_z: f64,
@@ -41,6 +49,67 @@ impl Worldborder {
             warning_time,
             damage_per_block: 0.0,
             buffer: 0.0,
+        }
+    }
+
+    /// The border `World::load` used when the save has no border section.
+    #[must_use]
+    pub const fn vanilla_default() -> Self {
+        Self::new(
+            0.0,
+            0.0,
+            DEFAULT_DIAMETER,
+            0,
+            DEFAULT_WARNING_BLOCKS,
+            DEFAULT_WARNING_TIME,
+        )
+    }
+
+    /// Rebuilds a border from the saved centre, size, and lerp.
+    ///
+    /// A stationary border stores the same value for size and lerp target.
+    /// A moving one stores the current diameter as the size and the destination
+    /// as the lerp target, with the remaining time in milliseconds.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field stored in the border save"
+    )]
+    #[must_use]
+    pub const fn from_saved(
+        center_x: f64,
+        center_z: f64,
+        size: f64,
+        lerp_target: f64,
+        lerp_time: i64,
+        warning_blocks: i32,
+        warning_time: i32,
+        damage_per_block: f32,
+        safe_zone: f32,
+    ) -> Self {
+        let mut border = Self::new(
+            center_x,
+            center_z,
+            size,
+            lerp_time,
+            warning_blocks,
+            warning_time,
+        );
+        if lerp_time != 0 {
+            border.new_diameter = lerp_target;
+        }
+        border.damage_per_block = damage_per_block;
+        border.buffer = safe_zone;
+        border
+    }
+
+    /// Diameter written as `size`. While a lerp is running, that is the diameter
+    /// the lerp started from; otherwise it is the live diameter.
+    #[must_use]
+    pub const fn saved_size(&self) -> f64 {
+        if self.speed == 0 {
+            self.new_diameter
+        } else {
+            self.old_diameter
         }
     }
 

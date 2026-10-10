@@ -585,6 +585,13 @@ impl Server {
     pub async fn save_all(&self) -> Result<(), String> {
         self.management_hub.broadcast_server_saving();
 
+        // `/save-all` writes world info without shutting worlds down. Snapshot
+        // the live clock, weather, border, and scoreboard first, or the writer
+        // stores the values from startup.
+        for world in self.worlds.load().iter() {
+            world.persist_saved_level();
+        }
+
         if let Err(err) = self.save_world_info() {
             error!("Failed to save world info: {err}");
             return Err(format!("Failed to save world info: {err}"));

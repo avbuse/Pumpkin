@@ -509,6 +509,22 @@ pub fn read_world_clocks(level_folder: &Path) -> WorldClocksData {
     }
 }
 
+fn existing_clock_data(path: &Path) -> NbtCompound {
+    if !path.exists() {
+        return NbtCompound::new();
+    }
+    let Ok(file) = File::open(path) else {
+        return NbtCompound::new();
+    };
+    match read_gzip_compound_tag(file) {
+        Ok(root) => root.get_compound("data").cloned().unwrap_or_default(),
+        Err(error) => {
+            warn!("Failed to read world_clocks.dat while saving clocks: {error}");
+            NbtCompound::new()
+        }
+    }
+}
+
 fn world_clocks_from_nbt(root: &NbtCompound) -> WorldClocksData {
     let mut result = WorldClocksData::default();
 
@@ -540,9 +556,10 @@ pub fn write_world_clocks(
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("world_clocks.dat");
 
-    let mut inner = NbtCompound::new();
+    // Keep rate, pause, and partial tick. This writer only owns `total_ticks`.
+    let mut inner = existing_clock_data(&path);
     for (dim_name, clock) in &clocks.clocks {
-        let mut dim_compound = NbtCompound::new();
+        let mut dim_compound = inner.get_compound(dim_name).cloned().unwrap_or_default();
         dim_compound.put_long("total_ticks", clock.total_ticks);
         inner.put_compound(dim_name, dim_compound);
     }

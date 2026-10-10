@@ -173,6 +173,7 @@ pub mod end_podium;
 pub mod entity_tracker;
 pub mod environment;
 pub mod natural_spawner;
+mod saved_level;
 pub mod scoreboard;
 pub mod weather;
 
@@ -379,6 +380,18 @@ impl World {
         let dragon_fight = (dimension.minecraft_name == Dimension::THE_END.minecraft_name)
             .then(|| std::sync::Mutex::new(dragon_fight::DragonFight::new()));
 
+        // Gamerules already live on `level_info`. Time, weather, the border, and
+        // the scoreboard are separate objects. A missing section keeps the
+        // defaults this function used to construct.
+        let restored = {
+            let info = level_info.load();
+            saved_level::load_level_state(
+                &level.level_folder.root_folder,
+                dimension.minecraft_name,
+                &info,
+            )
+        };
+
         let custom_data_path = level
             .level_folder
             .root_folder
@@ -401,18 +414,11 @@ impl World {
             level_info,
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
-            scoreboard: std::sync::Mutex::new(Scoreboard::default()),
-            worldborder: std::sync::Mutex::new(Worldborder::new(
-                0.0,
-                0.0,
-                5.999_996_8E7,
-                0,
-                5,
-                300,
-            )),
-            level_time: std::sync::Mutex::new(LevelTime::new()),
+            scoreboard: std::sync::Mutex::new(restored.scoreboard),
+            worldborder: std::sync::Mutex::new(restored.border),
+            level_time: std::sync::Mutex::new(restored.time),
             dimension,
-            weather: std::sync::Mutex::new(Weather::new()),
+            weather: std::sync::Mutex::new(restored.weather),
             block_registry,
             sea_level: generation_settings.sea_level,
             min_y: i32::from(generation_settings.shape.min_y),
@@ -580,7 +586,44 @@ impl World {
         dx <= radius && dz <= radius
     }
 
+    /// Copies the live clock, weather, border, and scoreboard into the world folder.
+    pub(crate) fn persist_saved_level(&self) {
+        let time = self
+            .level_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let weather = self
+            .weather
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let border = self
+            .worldborder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let scoreboard = self
+            .scoreboard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        saved_level::persist_level_state(
+            &self.level.level_folder.root_folder,
+            self.dimension.minecraft_name,
+            &time,
+            &weather,
+            &border,
+            &scoreboard,
+            &self.level_info,
+        );
+    }
+
     pub async fn shutdown(&self) {
+        // The world-info writer runs after every world has shut down, and it
+        // rewrites the clock and clear-weather timer from `level_info`.
+        self.persist_saved_level();
+
         let entities = self.entities.load_full();
         self.save_entities_by_chunk(&entities, self.level.live_entity_chunk_positions())
             .await;
