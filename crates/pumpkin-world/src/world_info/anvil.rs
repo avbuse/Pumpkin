@@ -37,7 +37,7 @@ const WORLD_GEN_SETTINGS_TAG: &str = "WorldGenSettings";
 
 pub struct AnvilLevelInfo;
 
-fn check_data_version(data: &NbtCompound) -> Result<(), WorldInfoError> {
+pub(super) fn check_data_version(data: &NbtCompound) -> Result<(), WorldInfoError> {
     let Some(data_version) = data.get_int("DataVersion") else {
         error!(
             "The level.dat file does not have a data version! This means it is either corrupt or very old (read unsupported)"

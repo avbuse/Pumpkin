@@ -13,7 +13,7 @@ pub mod data_files;
 
 // Constraint: disk biome palette serialization changed in 1.21.5
 pub const MINIMUM_SUPPORTED_WORLD_DATA_VERSION: i32 = 4435; // 1.21.9
-pub const MAXIMUM_SUPPORTED_WORLD_DATA_VERSION: i32 = 4903; // 26.2
+pub const MAXIMUM_SUPPORTED_WORLD_DATA_VERSION: i32 = 5023; // 5023 is the 26.3 data version
 
 pub const MINIMUM_SUPPORTED_LEVEL_VERSION: i32 = 19132; // 1.21.9
 pub const MAXIMUM_SUPPORTED_LEVEL_VERSION: i32 = 19133; // 1.21.9
@@ -614,7 +614,39 @@ pub enum WorldInfoError {
 
 #[cfg(test)]
 mod tests {
+    use pumpkin_nbt::compound::NbtCompound;
+
     use super::*;
+
+    fn level_dat_data(data_version: i32) -> NbtCompound {
+        let mut data = NbtCompound::new();
+        data.put_int("DataVersion", data_version);
+        let mut root = NbtCompound::new();
+        root.put_compound("Data", data);
+        root.get_compound("Data")
+            .expect("synthetic level.dat has a Data compound")
+            .clone()
+    }
+
+    #[test]
+    fn supported_world_data_version_bounds() {
+        for data_version in [4435, 4903, 5023] {
+            let data = level_dat_data(data_version);
+            assert!(
+                anvil::check_data_version(&data).is_ok(),
+                "data version {data_version} should open"
+            );
+        }
+
+        for data_version in [4434, 5024] {
+            let data = level_dat_data(data_version);
+            let error = anvil::check_data_version(&data).expect_err("out of range");
+            assert!(
+                matches!(error, WorldInfoError::UnsupportedDataVersion(version) if version == data_version),
+                "data version {data_version} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn world_presets_parse() {

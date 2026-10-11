@@ -27,7 +27,7 @@ use pumpkin_protocol::java::client::status::CStatusResponse;
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
 use pumpkin_protocol::java::server::config::{
-    SAcknowledgeFinishConfig, SClientInformationConfig, SKnownPacks,
+    SAcknowledgeFinishConfig, SClientInformationConfig, SKeepAlive as SConfigKeepAlive, SKnownPacks,
 };
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
@@ -37,6 +37,7 @@ use pumpkin_protocol::java::server::play::{
 };
 use pumpkin_protocol::java::server::status::SStatusRequest;
 use pumpkin_protocol::ser::NetworkReadExt;
+use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_protocol::{
     ClientPacket, ConnectionState, MultiVersionJavaPacket, ServerPacket, VarInt,
 };
@@ -51,6 +52,22 @@ use crate::error::Error;
 use crate::trace::{Direction, PacketRecord, Phase};
 
 const CHUNK_ACK_PER_TICK: f32 = 32.0;
+/// Challenge id on the keep-alive sent during configuration. The server has not
+/// issued one; the packet only has to be accepted.
+const CONFIG_KEEP_ALIVE_ID: i64 = 1;
+/// Outside the 26.3 serverbound configuration set (ids 0 through 9).
+const UNKNOWN_CONFIG_PACKET_ID: i32 = 127;
+
+/// Extra configuration packet sent by a scenario, on top of the normal login.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigProbe {
+    /// Login used by the smoke session and by vanilla milestones.
+    None,
+    /// One serverbound keep-alive before finish acknowledgement.
+    KeepAlive,
+    /// An id the configuration phase does not dispatch.
+    Unknown,
+}
 /// 26.3 `ParticleStatus.ALL`. The client-information codec in this tree stops
 /// before this field, and a vanilla 26.3 server will not decode the packet without it.
 const PARTICLE_STATUS_ALL: u8 = 0;
@@ -124,6 +141,34 @@ pub struct Bot {
 impl Bot {
     /// Offline-mode login through configuration, stopping at the start of play.
     pub async fn connect(addr: SocketAddr, username: &str) -> Result<Self, Error> {
+        Self::open(addr, username, ConfigProbe::None).await
+    }
+
+    /// Same login as `connect`, plus one configuration keep-alive before the
+    /// finish acknowledgement.
+    pub async fn connect_with_config_keep_alive(
+        addr: SocketAddr,
+        username: &str,
+    ) -> Result<Self, Error> {
+        Self::open(addr, username, ConfigProbe::KeepAlive).await
+    }
+
+    /// Log in far enough to send an unknown configuration id, and succeed when
+    /// the server disconnects instead of entering play.
+    pub async fn expect_unknown_config_rejected(
+        addr: SocketAddr,
+        username: &str,
+    ) -> Result<(), Error> {
+        match Self::open(addr, username, ConfigProbe::Unknown).await {
+            Ok(_) => Err(Error::scenario(
+                "unknown configuration packet did not disconnect the client",
+            )),
+            Err(err) if err.to_string().contains("disconnected during") => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn open(addr: SocketAddr, username: &str, probe: ConfigProbe) -> Result<Self, Error> {
         let stream = timeout(Duration::from_secs(10), TcpStream::connect(addr))
             .await
             .map_err(|_| Error::scenario(format!("timed out connecting to {addr}")))?
@@ -159,7 +204,7 @@ impl Bot {
         })
         .await?;
         bot.finish_login().await?;
-        bot.finish_config().await?;
+        bot.finish_config(probe).await?;
         Ok(bot)
     }
 
@@ -328,13 +373,22 @@ impl Bot {
         Ok(())
     }
 
-    async fn finish_config(&mut self) -> Result<(), Error> {
+    async fn finish_config(&mut self, probe: ConfigProbe) -> Result<(), Error> {
         self.send_client_information().await?;
+        if probe == ConfigProbe::KeepAlive {
+            self.send_packet(&SConfigKeepAlive {
+                keep_alive_id: CONFIG_KEEP_ALIVE_ID,
+            })
+            .await?;
+        }
+        if probe == ConfigProbe::Unknown {
+            self.send_unknown_config_packet().await?;
+        }
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut answered_packs = false;
         loop {
             match self.recv_until(deadline).await? {
-                Incoming::KnownPacks if !answered_packs => {
+                Incoming::KnownPacks if !answered_packs && probe != ConfigProbe::Unknown => {
                     // An empty list asks the server to send full registry data.
                     self.send_packet(&SKnownPacks {
                         known_packs: Vec::new(),
@@ -343,6 +397,11 @@ impl Bot {
                     answered_packs = true;
                 }
                 Incoming::FinishConfiguration => {
+                    if probe == ConfigProbe::Unknown {
+                        return Err(Error::scenario(
+                            "unknown configuration packet was accepted; the server asked the client to finish",
+                        ));
+                    }
                     self.send_packet(&SAcknowledgeFinishConfig).await?;
                     self.phase = Phase::Play;
                     return Ok(());
@@ -524,6 +583,28 @@ impl Bot {
         };
         self.pending.extend(changes);
         Ok(first)
+    }
+
+    async fn send_unknown_config_packet(&mut self) -> Result<(), Error> {
+        let mut body = Vec::new();
+        body.write_var_int(&VarInt(UNKNOWN_CONFIG_PACKET_ID))
+            .map_err(|err| Error::scenario(format!("encode unknown config packet: {err}")))?;
+        let payload_len = body.len();
+        self.encoder
+            .write_packet(bytes::Bytes::from(body))
+            .await
+            .map_err(|err| Error::scenario(format!("write unknown config packet: {err}")))?;
+        self.encoder
+            .flush()
+            .await
+            .map_err(|err| Error::scenario(format!("flush unknown config packet: {err}")))?;
+        self.trace.push(PacketRecord {
+            direction: Direction::Out,
+            phase: self.phase,
+            id: UNKNOWN_CONFIG_PACKET_ID,
+            payload_len,
+        });
+        Ok(())
     }
 
     async fn send_packet<P: ClientPacket>(&mut self, packet: &P) -> Result<(), Error> {

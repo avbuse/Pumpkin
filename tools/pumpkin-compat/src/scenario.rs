@@ -33,6 +33,43 @@ pub struct SmokeReport {
     pub trace: Vec<PacketRecord>,
 }
 
+/// Send one configuration keep-alive before finish acknowledgement, then join play.
+pub async fn config_keep_alive_reaches_play(addr: SocketAddr) -> Result<SpawnInfo, Error> {
+    let mut bot = Bot::connect_with_config_keep_alive(addr, "KeepAliveBot").await?;
+    let spawn = bot.await_spawn(LOGIN_BUDGET).await?;
+    if spawn.chunk_count == 0 {
+        return Err(Error::scenario(
+            "configuration keep-alive joined play but no chunk arrived",
+        ));
+    }
+    Ok(spawn)
+}
+
+/// An id outside the configuration set still disconnects the client.
+pub async fn unknown_config_id_is_rejected(addr: SocketAddr) -> Result<(), Error> {
+    Bot::expect_unknown_config_rejected(addr, "UnknownBot").await
+}
+
+/// One server: unknown configuration ids still kick, and a keep-alive reaches play.
+pub async fn run_config_packet_checks(binary: &std::path::Path) -> Result<(), Error> {
+    let server = PumpkinProcess::start(binary).await?;
+    let addr = server.addr();
+    let result: Result<(), Error> = async {
+        unknown_config_id_is_rejected(addr).await?;
+        config_keep_alive_reaches_play(addr).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = result {
+        let log = server.log_tail();
+        let _ = server.shutdown().await;
+        return Err(Error::scenario(format!(
+            "{err}\n--- pumpkin log ---\n{log}"
+        )));
+    }
+    server.shutdown().await
+}
+
 /// Login far enough to record a milestone trace. Does not place blocks.
 pub async fn login_spawn(
     addr: SocketAddr,
