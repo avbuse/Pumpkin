@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use pumpkin_data::scoreboard::ScoreboardDisplaySlot;
+use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_protocol::{
     BClientPacket, ClientPacket, NumberFormat,
     bedrock::client::{
@@ -15,6 +16,7 @@ use pumpkin_protocol::{
     },
 };
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::version::JavaMinecraftVersion;
 use tracing::warn;
 
 use super::World;
@@ -791,6 +793,16 @@ impl NameTagVisibility {
             Self::HideForOwnTeam => "hideForOwnTeam",
         }
     }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "never" => Self::Never,
+            "hideForOtherTeams" => Self::HideForOtherTeams,
+            "hideForOwnTeam" => Self::HideForOwnTeam,
+            _ => Self::Always,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -809,6 +821,16 @@ impl CollisionRule {
             Self::Never => "never",
             Self::PushOtherTeams => "pushOtherTeams",
             Self::PushOwnTeam => "pushOwnTeam",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "never" => Self::Never,
+            "pushOtherTeams" => Self::PushOtherTeams,
+            "pushOwnTeam" => Self::PushOwnTeam,
+            _ => Self::Always,
         }
     }
 }
@@ -1265,5 +1287,305 @@ impl BedrockScoreboardBuilder {
     #[must_use]
     pub fn build(self) -> BedrockScoreboard {
         self.scoreboard
+    }
+}
+
+const FRIENDLY_FIRE_BIT: i8 = 1;
+const SEE_FRIENDLY_INVISIBLES_BIT: i8 = 2;
+
+impl Scoreboard {
+    /// Reads `scoreboard.dat`. A missing or empty `data` compound is an empty board.
+    #[must_use]
+    pub fn from_nbt(root: &NbtCompound) -> Self {
+        let data = root.get_compound("data").unwrap_or(root);
+        let mut board = Self::default();
+        if let Some(objectives) = data.get_list("Objectives") {
+            for tag in objectives {
+                let Some(compound) = tag.extract_compound() else {
+                    continue;
+                };
+                let Some(name) = compound.get_string("Name") else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let criterion = compound.get_string("CriteriaName").unwrap_or("dummy");
+                let render_type = match compound.get_string("RenderType") {
+                    Some("hearts") => RenderType::Hearts,
+                    _ => RenderType::Integer,
+                };
+                board.objectives.insert(
+                    name.to_string(),
+                    ScoreboardObjective::new(
+                        name,
+                        text_from_saved(compound, "DisplayName", name),
+                        render_type,
+                        None,
+                        criterion,
+                    ),
+                );
+            }
+        }
+        if let Some(scores) = data.get_list("PlayerScores") {
+            for tag in scores {
+                let Some(compound) = tag.extract_compound() else {
+                    continue;
+                };
+                let Some(entity_name) = compound.get_string("Name") else {
+                    continue;
+                };
+                let Some(objective_name) = compound.get_string("Objective") else {
+                    continue;
+                };
+                let value = compound.get_int("Score").unwrap_or(0);
+                board
+                    .scores
+                    .entry(objective_name.to_string())
+                    .or_default()
+                    .insert(
+                        entity_name.to_string(),
+                        ScoreboardScore {
+                            entity_name: entity_name.to_string(),
+                            objective_name: objective_name.to_string(),
+                            value: VarInt(value),
+                            display_name: compound.get("display").map(TextComponent::from_nbt),
+                            number_format: None,
+                            locked: compound.get_bool("Locked").unwrap_or(false),
+                        },
+                    );
+            }
+        }
+        if let Some(teams) = data.get_list("Teams") {
+            for tag in teams {
+                let Some(compound) = tag.extract_compound() else {
+                    continue;
+                };
+                let Some(name) = compound.get_string("Name") else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                board
+                    .teams
+                    .insert(name.to_string(), team_from_nbt(compound, name));
+            }
+        }
+        if let Some(slots) = data.get_compound("DisplaySlots") {
+            for (key, tag) in &slots.child_tags {
+                let Some(objective_name) = tag.extract_string() else {
+                    continue;
+                };
+                let Some(slot) = display_slot_from_name(key) else {
+                    continue;
+                };
+                board.display_slots.insert(slot, objective_name.to_string());
+            }
+        }
+        board
+    }
+
+    /// The `data` compound of `scoreboard.dat`. The file wrapper adds `DataVersion`.
+    #[must_use]
+    pub fn saved_data(&self) -> NbtCompound {
+        let mut data = NbtCompound::new();
+        if !self.objectives.is_empty() {
+            let objectives = self
+                .objectives
+                .values()
+                .map(objective_to_nbt)
+                .map(NbtTag::Compound)
+                .collect();
+            data.put_list("Objectives", objectives);
+        }
+        if !self.scores.is_empty() {
+            let mut scores = Vec::new();
+            for objective_scores in self.scores.values() {
+                for score in objective_scores.values() {
+                    scores.push(NbtTag::Compound(score_to_nbt(score)));
+                }
+            }
+            if !scores.is_empty() {
+                data.put_list("PlayerScores", scores);
+            }
+        }
+        if !self.teams.is_empty() {
+            let teams = self
+                .teams
+                .values()
+                .map(team_to_nbt)
+                .map(NbtTag::Compound)
+                .collect();
+            data.put_list("Teams", teams);
+        }
+        if !self.display_slots.is_empty() {
+            let mut slots = NbtCompound::new();
+            for (slot, name) in &self.display_slots {
+                slots.put_string(display_slot_name(*slot), name.clone());
+            }
+            data.put_compound("DisplaySlots", slots);
+        }
+        data
+    }
+
+    /// Writes `scoreboard.dat`. Empty lists are left out, matching an empty save.
+    #[must_use]
+    pub fn to_nbt(&self, data_version: i32) -> NbtCompound {
+        let mut root = NbtCompound::new();
+        root.put_int("DataVersion", data_version);
+        root.put_compound("data", self.saved_data());
+        root
+    }
+}
+
+fn text_from_saved(compound: &NbtCompound, key: &str, fallback: &str) -> TextComponent {
+    // A string tag is literal text. Since 1.21.5 that is how vanilla reads it.
+    compound.get(key).map_or_else(
+        || TextComponent::text(fallback.to_string()),
+        TextComponent::from_nbt,
+    )
+}
+
+fn put_saved_text(compound: &mut NbtCompound, key: &str, component: &TextComponent) {
+    compound.put(
+        key,
+        component.to_nbt_tag_for_version(&JavaMinecraftVersion::V_26_3),
+    );
+}
+
+fn objective_to_nbt(objective: &ScoreboardObjective) -> NbtCompound {
+    let mut compound = NbtCompound::new();
+    compound.put_string("Name", objective.name.clone());
+    compound.put_string("CriteriaName", objective.criterion.clone());
+    put_saved_text(&mut compound, "DisplayName", &objective.display_name);
+    let render_type = match objective.render_type {
+        RenderType::Hearts => "hearts",
+        RenderType::Integer => "integer",
+    };
+    compound.put_string("RenderType", render_type.to_string());
+    compound
+}
+
+fn score_to_nbt(score: &ScoreboardScore) -> NbtCompound {
+    let mut compound = NbtCompound::new();
+    compound.put_string("Name", score.entity_name.clone());
+    compound.put_string("Objective", score.objective_name.clone());
+    compound.put_int("Score", score.value.0);
+    compound.put_bool("Locked", score.locked);
+    if let Some(display_name) = &score.display_name {
+        put_saved_text(&mut compound, "display", display_name);
+    }
+    compound
+}
+
+fn team_from_nbt(compound: &NbtCompound, name: &str) -> Team {
+    let mut options = 0;
+    if compound.get_bool("AllowFriendlyFire").unwrap_or(false) {
+        options |= FRIENDLY_FIRE_BIT;
+    }
+    if compound.get_bool("SeeFriendlyInvisibles").unwrap_or(false) {
+        options |= SEE_FRIENDLY_INVISIBLES_BIT;
+    }
+    let players = compound.get_list("Players").map_or_else(Vec::new, |list| {
+        list.iter()
+            .filter_map(|tag| tag.extract_string().map(str::to_string))
+            .collect()
+    });
+    let color = compound
+        .get_string("TeamColor")
+        .and_then(|color| NamedColor::try_from(color).ok())
+        .unwrap_or(NamedColor::White);
+    Team {
+        name: name.to_string(),
+        display_name: text_from_saved(compound, "DisplayName", name),
+        options,
+        nametag_visibility: NameTagVisibility::from_name(
+            compound.get_string("NameTagVisibility").unwrap_or("always"),
+        ),
+        collision_rule: CollisionRule::from_name(
+            compound.get_string("CollisionRule").unwrap_or("always"),
+        ),
+        color,
+        player_prefix: text_from_saved(compound, "MemberNamePrefix", ""),
+        player_suffix: text_from_saved(compound, "MemberNameSuffix", ""),
+        players,
+    }
+}
+
+fn team_to_nbt(team: &Team) -> NbtCompound {
+    let mut compound = NbtCompound::new();
+    compound.put_string("Name", team.name.clone());
+    put_saved_text(&mut compound, "DisplayName", &team.display_name);
+    compound.put_bool("AllowFriendlyFire", (team.options & FRIENDLY_FIRE_BIT) != 0);
+    compound.put_bool(
+        "SeeFriendlyInvisibles",
+        (team.options & SEE_FRIENDLY_INVISIBLES_BIT) != 0,
+    );
+    compound.put_string(
+        "NameTagVisibility",
+        team.nametag_visibility.to_str().to_string(),
+    );
+    compound.put_string("CollisionRule", team.collision_rule.to_str().to_string());
+    compound.put_string("TeamColor", team.color.name().to_string());
+    put_saved_text(&mut compound, "MemberNamePrefix", &team.player_prefix);
+    put_saved_text(&mut compound, "MemberNameSuffix", &team.player_suffix);
+    if !team.players.is_empty() {
+        let players = team
+            .players
+            .iter()
+            .map(|player| NbtTag::from(player.as_str()))
+            .collect();
+        compound.put_list("Players", players);
+    }
+    compound
+}
+
+const fn display_slot_name(slot: ScoreboardDisplaySlot) -> &'static str {
+    match slot {
+        ScoreboardDisplaySlot::List => "list",
+        ScoreboardDisplaySlot::Sidebar => "sidebar",
+        ScoreboardDisplaySlot::BelowName => "below_name",
+        ScoreboardDisplaySlot::TeamBlack => "sidebar.team.black",
+        ScoreboardDisplaySlot::TeamDarkBlue => "sidebar.team.dark_blue",
+        ScoreboardDisplaySlot::TeamDarkGreen => "sidebar.team.dark_green",
+        ScoreboardDisplaySlot::TeamDarkAqua => "sidebar.team.dark_aqua",
+        ScoreboardDisplaySlot::TeamDarkRed => "sidebar.team.dark_red",
+        ScoreboardDisplaySlot::TeamDarkPurple => "sidebar.team.dark_purple",
+        ScoreboardDisplaySlot::TeamGold => "sidebar.team.gold",
+        ScoreboardDisplaySlot::TeamGray => "sidebar.team.gray",
+        ScoreboardDisplaySlot::TeamDarkGray => "sidebar.team.dark_gray",
+        ScoreboardDisplaySlot::TeamBlue => "sidebar.team.blue",
+        ScoreboardDisplaySlot::TeamGreen => "sidebar.team.green",
+        ScoreboardDisplaySlot::TeamAqua => "sidebar.team.aqua",
+        ScoreboardDisplaySlot::TeamRed => "sidebar.team.red",
+        ScoreboardDisplaySlot::TeamLightPurple => "sidebar.team.light_purple",
+        ScoreboardDisplaySlot::TeamYellow => "sidebar.team.yellow",
+        ScoreboardDisplaySlot::TeamWhite => "sidebar.team.white",
+    }
+}
+
+fn display_slot_from_name(name: &str) -> Option<ScoreboardDisplaySlot> {
+    match name {
+        "list" => Some(ScoreboardDisplaySlot::List),
+        "sidebar" => Some(ScoreboardDisplaySlot::Sidebar),
+        "below_name" | "belowName" => Some(ScoreboardDisplaySlot::BelowName),
+        "sidebar.team.black" => Some(ScoreboardDisplaySlot::TeamBlack),
+        "sidebar.team.dark_blue" => Some(ScoreboardDisplaySlot::TeamDarkBlue),
+        "sidebar.team.dark_green" => Some(ScoreboardDisplaySlot::TeamDarkGreen),
+        "sidebar.team.dark_aqua" => Some(ScoreboardDisplaySlot::TeamDarkAqua),
+        "sidebar.team.dark_red" => Some(ScoreboardDisplaySlot::TeamDarkRed),
+        "sidebar.team.dark_purple" => Some(ScoreboardDisplaySlot::TeamDarkPurple),
+        "sidebar.team.gold" => Some(ScoreboardDisplaySlot::TeamGold),
+        "sidebar.team.gray" => Some(ScoreboardDisplaySlot::TeamGray),
+        "sidebar.team.dark_gray" => Some(ScoreboardDisplaySlot::TeamDarkGray),
+        "sidebar.team.blue" => Some(ScoreboardDisplaySlot::TeamBlue),
+        "sidebar.team.green" => Some(ScoreboardDisplaySlot::TeamGreen),
+        "sidebar.team.aqua" => Some(ScoreboardDisplaySlot::TeamAqua),
+        "sidebar.team.red" => Some(ScoreboardDisplaySlot::TeamRed),
+        "sidebar.team.light_purple" => Some(ScoreboardDisplaySlot::TeamLightPurple),
+        "sidebar.team.yellow" => Some(ScoreboardDisplaySlot::TeamYellow),
+        "sidebar.team.white" => Some(ScoreboardDisplaySlot::TeamWhite),
+        _ => None,
     }
 }

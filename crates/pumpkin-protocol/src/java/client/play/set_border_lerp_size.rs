@@ -10,6 +10,7 @@ use pumpkin_util::version::JavaMinecraftVersion;
 pub struct CSetBorderLerpSize {
     pub old_diameter: f64,
     pub new_diameter: f64,
+    /// Remaining lerp time in ticks. 26.3 writes `WorldBorder.getLerpTime()` unchanged.
     pub speed: VarLong,
 }
 

@@ -106,6 +106,25 @@ impl LevelTime {
         self.world_age = world_age;
     }
 
+    /// Restores the overworld clock and the shared game time.
+    ///
+    /// `time_of_day` is the clock's `total_ticks`. `world_age` is `level.dat`
+    /// `Time`, which the clock does not store. Rate and pause come from the
+    /// same clock record.
+    pub const fn restore(
+        &mut self,
+        time_of_day: i64,
+        world_age: i64,
+        partial_tick: f32,
+        rate: f32,
+        paused: bool,
+    ) {
+        self.load_from(time_of_day, world_age);
+        self.partial_tick = partial_tick;
+        self.rate = rate;
+        self.paused = paused;
+    }
+
     /// Vanilla `ServerLevel.tickTime`. Callers that emit periodic `CUpdateTime`
     /// (`forceGameTimeSynchronization`) must do so before this increment.
     pub fn tick(&mut self, advance_time: bool) {
@@ -240,6 +259,20 @@ mod tests {
         clock.set_paused(true);
         clock.tick();
         assert_eq!(clock.total_ticks, 4);
+    }
+
+    #[test]
+    fn level_time_restore_keeps_day_and_age() {
+        let mut time = LevelTime::new();
+        time.restore(18_000, 50_000, 0.25, 2.0, true);
+
+        assert_eq!(time.time_of_day, 18_000);
+        assert_eq!(time.world_age, 50_000);
+        assert_eq!(time.query_daytime(), 18_000);
+        assert_eq!(time.query_gametime(), 50_000);
+        assert_eq!(time.partial_tick, 0.25);
+        assert_eq!(time.rate, 2.0);
+        assert!(time.paused);
     }
 
     #[test]
