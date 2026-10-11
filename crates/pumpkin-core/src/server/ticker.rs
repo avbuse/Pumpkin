@@ -1,4 +1,5 @@
 use super::server_test_manager::drain_game_test_queue;
+use super::tick_timings::{self, TickPhase};
 
 use crate::{
     STOP_INTERRUPT,
@@ -89,12 +90,20 @@ impl Ticker {
 
             manager.tick();
 
+            // Phase buffers live on the server. This only clears them.
+            server.tick_timings.begin_tick();
+
             let tick_number = server.tick_count.load(Ordering::Relaxed);
             if server.plugin_manager.has_handlers::<ServerTickStartEvent>() {
+                let plugin_phase = Instant::now();
                 server.runtime.block_on(
                     server
                         .plugin_manager
                         .fire(server, &mut ServerTickStartEvent::new(tick_number)),
+                );
+                server.tick_timings.add_phase(
+                    TickPhase::Plugins,
+                    tick_timings::duration_to_nanos(plugin_phase.elapsed()),
                 );
             }
 
@@ -122,10 +131,15 @@ impl Ticker {
 
             let tick_number = server.tick_count.load(Ordering::Relaxed);
             if server.plugin_manager.has_handlers::<ServerTickEndEvent>() {
+                let plugin_phase = Instant::now();
                 server.runtime.block_on(server.plugin_manager.fire(
                     server,
                     &mut ServerTickEndEvent::new(tick_number, tick_duration_nanos),
                 ));
+                server.tick_timings.add_phase(
+                    TickPhase::Plugins,
+                    tick_timings::duration_to_nanos(plugin_phase.elapsed()),
+                );
             }
 
             server.update_tick_times(tick_duration_nanos);

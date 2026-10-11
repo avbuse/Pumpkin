@@ -21,7 +21,7 @@ const PERMISSION: &str = "minecraft:command.tick";
 
 // Helper function to format nanoseconds to milliseconds with 2 decimal places
 fn nanos_to_millis_string(nanos: i64) -> String {
-    format!("{:.2}", nanos as f64 / 1_000_000.0)
+    crate::server::tick_timings::format_tick_millis(nanos)
 }
 
 enum SubCommand {
@@ -124,31 +124,17 @@ impl TickExecutor {
     }
 
     fn send_percentiles(source: &CommandSource, server: &Server) {
-        let mut times = server.get_tick_times_nanos_copy();
-        let tick_count =
-            (server.tick_count.load(std::sync::atomic::Ordering::Relaxed) as usize).min(100);
-        let slice = &mut times[..tick_count];
-        slice.sort_unstable();
-
-        let (p50, p95, p99) = if slice.is_empty() {
-            (0, 0, 0)
-        } else {
-            (
-                slice[(slice.len() * 50) / 100],
-                slice[(slice.len() * 95) / 100],
-                slice[(slice.len() * 99) / 100],
-            )
-        };
+        let percentiles = server.mspt_percentiles();
 
         source.send_feedback(
             TextComponent::translate_cross(
                 translation::java::COMMANDS_TICK_QUERY_PERCENTILES,
                 translation::java::COMMANDS_TICK_QUERY_PERCENTILES,
                 [
-                    TextComponent::text(nanos_to_millis_string(p50)),
-                    TextComponent::text(nanos_to_millis_string(p95)),
-                    TextComponent::text(nanos_to_millis_string(p99)),
-                    TextComponent::text(slice.len().to_string()),
+                    TextComponent::text(nanos_to_millis_string(percentiles.p50_nanos)),
+                    TextComponent::text(nanos_to_millis_string(percentiles.p95_nanos)),
+                    TextComponent::text(nanos_to_millis_string(percentiles.p99_nanos)),
+                    TextComponent::text(percentiles.samples.to_string()),
                 ],
             ),
             false,
