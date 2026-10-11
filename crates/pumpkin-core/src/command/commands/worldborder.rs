@@ -80,7 +80,7 @@ fn set_size(
             return Err(ERROR_TOO_BIG.create_without_context());
         }
 
-        let speed = (time_in_ticks > 0).then(|| time_in_ticks * 50); // ticks to milliseconds
+        let speed = (time_in_ticks > 0).then_some(time_in_ticks);
 
         border.set_diameter(&world, distance, speed);
         (current, (distance - current) as i32)
@@ -165,22 +165,22 @@ fn set_center(source: &CommandSource, center: Vector2<f64>) -> Result<i32, Comma
 #[allow(clippy::unnecessary_wraps)]
 fn get_size(source: &CommandSource) -> Result<i32, CommandSyntaxError> {
     let world = source.world().clone();
-    let size = world
+    let reported = world
         .worldborder
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .new_diameter;
+        .reported_size();
 
     source.send_feedback(
         TextComponent::translate_cross(
             translation::java::COMMANDS_WORLDBORDER_GET,
             translation::java::COMMANDS_WORLDBORDER_GET,
-            [TextComponent::text(format!("{size:.0}"))],
+            [TextComponent::text(reported.to_string())],
         ),
         false,
     );
 
-    Ok((size + 0.5).floor() as i32)
+    Ok(reported)
 }
 
 fn set_damage_amount(
