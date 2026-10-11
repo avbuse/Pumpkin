@@ -3,6 +3,10 @@
 //! The client speaks the same protocol version as this workspace
 //! (`CURRENT_MC_VERSION`). Scenarios start a scratch server, so they are
 //! ignored by the default test run and invoked from `.github/workflows/compat.yml`.
+//!
+//! [`scenarios`] lists the named scenarios. [`run_scenario`] is the single
+//! dispatch point: connected scenarios share one Pumpkin launcher, and the
+//! client is already logged in when a scenario function runs.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -16,7 +20,8 @@ pub mod vanilla;
 pub use error::Error;
 pub use pumpkin_proc::{PumpkinProcess, pumpkin_binary};
 pub use scenario::{
-    SmokeReport, login_spawn, run_config_packet_checks, run_milestone_diff, run_pumpkin_smoke,
+    Scenario, ScenarioResult, SmokeReport, find_scenario, login_spawn, run_config_packet_checks,
+    run_milestone_diff, run_pumpkin_smoke, run_scenario, scenarios,
 };
 pub use trace::{milestone_diff, milestones_match};
 pub use vanilla::VanillaProcess;

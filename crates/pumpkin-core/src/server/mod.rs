@@ -46,7 +46,11 @@ use std::fs;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32};
-use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use std::{
+    future::Future,
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
@@ -60,6 +64,7 @@ pub mod scheduler;
 pub mod seasonal_events;
 pub mod server_test_manager;
 pub mod tick_rate_manager;
+pub mod tick_timings;
 pub mod ticker;
 
 pub use recipe::RecipeManager;
@@ -130,10 +135,12 @@ pub struct Server {
     pub white_list: AtomicBool,
     /// Manages the server's tick rate, freezing, and sprinting
     pub tick_rate_manager: Arc<ServerTickRateManager>,
-    /// Stores the duration of the last 100 ticks for performance analysis
-    pub tick_times_nanos: std::sync::Mutex<[i64; 100]>,
+    /// Stores the duration of the last [`tick_timings::TICK_SAMPLE_WINDOW`] ticks.
+    pub tick_times_nanos: std::sync::Mutex<[i64; tick_timings::TICK_SAMPLE_WINDOW]>,
     /// Aggregated tick times for efficient rolling average calculation
     pub aggregated_tick_times_nanos: AtomicI64,
+    /// Phase durations for the same window as `tick_times_nanos`. Allocated once.
+    pub(crate) tick_timings: tick_timings::TickTimings,
     /// Total number of ticks processed by the server
     pub tick_count: AtomicI32,
     /// Owns the server-wide tick profiling session used by `/debug`.
@@ -309,8 +316,9 @@ impl Server {
             advancement_manager,
             white_list,
             tick_rate_manager,
-            tick_times_nanos: std::sync::Mutex::new([0; 100]),
+            tick_times_nanos: std::sync::Mutex::new([0; tick_timings::TICK_SAMPLE_WINDOW]),
             aggregated_tick_times_nanos: AtomicI64::new(0),
+            tick_timings: tick_timings::TickTimings::new(),
             tick_count: AtomicI32::new(0),
             debug_profiler: debug_profiler::DebugProfiler::new(),
             tasks: TaskTracker::new(),
@@ -1150,7 +1158,15 @@ impl Server {
             self.tick_players_and_network();
         }
         self.flush_pending_block_updates();
+        // No Java player means there is nothing to flush, so the phase stays zero.
+        let flush_phase = (!suspended.is_empty()).then(Instant::now);
         Self::resume_player_flushes(&suspended);
+        if let Some(flush_phase) = flush_phase {
+            self.tick_timings.add_phase(
+                tick_timings::TickPhase::NetworkFlush,
+                tick_timings::duration_to_nanos(flush_phase.elapsed()),
+            );
+        }
     }
 
     fn flush_pending_block_updates(&self) {
@@ -1187,7 +1203,12 @@ impl Server {
             .datapack_manager
             .execute_function(self, &source, "#minecraft:tick");
 
+        let plugin_phase = Instant::now();
         self.plugin_manager.tick_loaders(self);
+        self.tick_timings.add_phase(
+            tick_timings::TickPhase::Plugins,
+            tick_timings::duration_to_nanos(plugin_phase.elapsed()),
+        );
         self.scheduled_functions.tick(
             self,
             self.tick_count.load(std::sync::atomic::Ordering::Relaxed) as u64,
@@ -1222,7 +1243,7 @@ impl Server {
     /// Updates the tick time statistics with the duration of the last tick.
     pub fn update_tick_times(&self, tick_duration_nanos: i64) {
         let tick_count = self.tick_count.fetch_add(1, Ordering::Relaxed);
-        let index = (tick_count % 100) as usize;
+        let index = (tick_count % tick_timings::TICK_SAMPLE_WINDOW as i32) as usize;
 
         let mut tick_times = self
             .tick_times_nanos
@@ -1231,6 +1252,8 @@ impl Server {
         let old_time = tick_times[index];
         tick_times[index] = tick_duration_nanos;
         drop(tick_times);
+
+        self.tick_timings.finish_tick(index);
 
         self.aggregated_tick_times_nanos
             .fetch_add(tick_duration_nanos - old_time, Ordering::Relaxed);
@@ -1261,10 +1284,10 @@ impl Server {
         }
     }
 
-    /// Gets the rolling average tick time over the last 100 ticks, in nanoseconds.
+    /// Gets the rolling average tick time over the fixed sample window, in nanoseconds.
     pub fn get_average_tick_time_nanos(&self) -> i64 {
         let tick_count = self.tick_count.load(Ordering::Relaxed);
-        let sample_size = (tick_count as usize).min(100);
+        let sample_size = (tick_count as usize).min(tick_timings::TICK_SAMPLE_WINDOW);
         if sample_size == 0 {
             return 0;
         }
@@ -1287,8 +1310,51 @@ impl Server {
         1000.0 / mspt
     }
 
-    /// Returns a copy of the last 100 tick times.
-    pub fn get_tick_times_nanos_copy(&self) -> [i64; 100] {
+    /// p50, p95, and p99 of the fixed tick-duration window, in nanoseconds.
+    #[must_use]
+    pub fn mspt_percentiles(&self) -> tick_timings::MsptPercentiles {
+        let times = self.get_tick_times_nanos_copy();
+        let completed = self.tick_count.load(Ordering::Relaxed).max(0) as usize;
+        let samples = completed.min(tick_timings::TICK_SAMPLE_WINDOW);
+        tick_timings::mspt_percentiles_from_samples(&times[..samples])
+    }
+
+    /// Phase durations for the last completed tick. A phase that did not run is zero.
+    #[must_use]
+    pub fn latest_tick_phases(&self) -> tick_timings::PhaseDurations {
+        let Some(index) = tick_timings::phase_ring_index(self.tick_count.load(Ordering::Relaxed))
+        else {
+            return tick_timings::PhaseDurations::default();
+        };
+        self.tick_timings.phase_at(index)
+    }
+
+    /// Records the world-tick phases `World::tick` already measured.
+    ///
+    /// Dimensions tick in parallel, so each phase keeps the slowest dimension.
+    /// Lighting is not a tick step and stays zero.
+    pub(crate) fn record_world_tick_phases(
+        &self,
+        chunks: Duration,
+        entities: Duration,
+        block_entities: Duration,
+    ) {
+        self.tick_timings.record_max_phase(
+            tick_timings::TickPhase::Chunks,
+            tick_timings::duration_to_nanos(chunks),
+        );
+        self.tick_timings.record_max_phase(
+            tick_timings::TickPhase::Entities,
+            tick_timings::duration_to_nanos(entities),
+        );
+        self.tick_timings.record_max_phase(
+            tick_timings::TickPhase::BlockEntities,
+            tick_timings::duration_to_nanos(block_entities),
+        );
+    }
+
+    /// Returns a copy of the tick durations in the fixed sample window.
+    pub fn get_tick_times_nanos_copy(&self) -> [i64; tick_timings::TICK_SAMPLE_WINDOW] {
         *self
             .tick_times_nanos
             .lock()

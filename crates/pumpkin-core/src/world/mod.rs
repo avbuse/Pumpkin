@@ -1693,6 +1693,8 @@ impl World {
                 block_entity_elapsed,
             );
         }
+
+        server.record_world_tick_phases(chunk_elapsed, entity_elapsed, block_entity_elapsed);
     }
 
     pub fn register_block_change(&self, position: BlockPos, block_state_id: BlockStateId) {
