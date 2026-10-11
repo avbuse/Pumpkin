@@ -6,7 +6,9 @@ use std::collections::{HashMap, VecDeque};
 use std::f64::consts::TAU;
 use std::num::NonZero;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicI32, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI8, AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering,
+};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -297,6 +299,7 @@ use crate::command::context::command_source::CommandSource;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::{CommandSender, client_suggestions};
 use crate::data::SaveJSONConfiguration;
+use crate::item::items::swords::SwordItem;
 use crate::log_at_level;
 use crate::net::{ClientPlatform, GameProfile};
 use crate::net::{DisconnectReason, PlayerConfig};
@@ -470,6 +473,8 @@ pub struct Player {
     pub ping: AtomicU32,
     /// The amount of ticks since the player's last attack.
     pub last_attacked_ticks: AtomicU32,
+    /// Main-hand item id on the previous tick. A different item resets the attack cooldown.
+    pub last_main_hand_item: AtomicU16,
     /// The player's last known experience level.
     pub last_sent_xp: AtomicI32,
     pub last_sent_health: AtomicI32,
@@ -773,6 +778,7 @@ impl Player {
             last_action_time: AtomicCell::new(std::time::Instant::now()),
             ping: AtomicU32::new(0),
             last_attacked_ticks: AtomicU32::new(0),
+            last_main_hand_item: AtomicU16::new(pumpkin_data::item::Item::AIR.id),
             client_loaded: AtomicBool::new(initially_loaded),
             bedrock_spawned: AtomicBool::new(false),
             client_loaded_timeout: AtomicU32::new(if initially_loaded { 0 } else { 60 }),
@@ -1334,108 +1340,98 @@ impl Player {
             );
         }
 
-        let base_damage = self
-            .living_entity
-            .get_attribute_value(&Attributes::ATTACK_DAMAGE);
-        let base_attack_speed = 4.0;
-
-        let mut damage_multiplier = 1.0;
-        let mut add_speed = 0.0;
-        let mut extra_ench_damage = 0.0;
-        let mut knockback_level = 0u32;
-
-        {
-            let stack = &item_stack;
-            if stack.is_empty() {
-                // Vanilla fist: base_attack_speed = -2.4
-                add_speed = -2.4;
-            } else if let Some(modifiers) = stack.get_data_component::<AttributeModifiersImpl>() {
-                // Only attack speed is read from the item here.
-                // Attack damage is already  part of `base_damage` via the held item's live
-                // ATTACK_DAMAGE modifier, re-adding it here would double it.
-                for item_mod in modifiers.attribute_modifiers.iter() {
-                    if item_mod.operation == Operation::AddValue
-                        && item_mod.id == "minecraft:base_attack_speed"
-                    {
-                        add_speed = item_mod.amount;
-                    }
-                }
-            }
-            if let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() {
-                for (enchantment, level) in enchantments.enchantment.iter() {
-                    enchantment.modify_damage_against(
-                        *level,
-                        &mut extra_ench_damage,
-                        Some(victim_entity.entity_type),
-                    );
-                    let mut kb = 0.0f32;
-                    enchantment.modify_knockback(*level, &mut kb);
-                    knockback_level += kb as u32;
-                }
-            }
-        }
-
-        let attack_speed = base_attack_speed + add_speed;
+        let attack_damage = self.attack_attribute_value(
+            &item_stack,
+            &Attributes::ATTACK_DAMAGE,
+            "minecraft:base_attack_damage",
+        );
+        let attack_speed = self.attack_attribute_value(
+            &item_stack,
+            &Attributes::ATTACK_SPEED,
+            "minecraft:base_attack_speed",
+        );
 
         let is_bedrock = matches!(self.client.as_ref(), ClientPlatform::Bedrock(_));
-        let attack_cooldown_progress = if is_bedrock {
+        let scale = if is_bedrock {
             1.0
         } else {
-            self.get_attack_cooldown_progress(f64::from(server.basic_config.tps), 0.5, attack_speed)
+            self.get_attack_cooldown_progress(
+                f64::from(server.basic_config.tps),
+                f64::from(combat::ATTACK_STRENGTH_ADJUST_TICKS),
+                attack_speed,
+            ) as f32
         };
+        let enchantment_bonus =
+            Self::melee_enchantment_bonus(&item_stack, victim_entity.entity_type);
+        let scaled_base = (attack_damage as f32) * combat::base_damage_scale_factor(scale);
+        let magic_preview = scale * enchantment_bonus;
+        // A swing always restarts the charge, including one that deals nothing.
         self.last_attacked_ticks.store(0, Ordering::Relaxed);
-
-        // Only reduce attack damage if in cooldown
-        // TODO: Enchantments are reduced in the same way, just without the square.
-        if attack_cooldown_progress < 1.0 {
-            damage_multiplier = attack_cooldown_progress.powi(2).mul_add(0.8, 0.2);
+        if scaled_base <= 0.0 && magic_preview <= 0.0 {
+            return;
         }
 
-        // Modify the added damage based on the multiplier.
-        let mut damage = base_damage * damage_multiplier;
-        damage += extra_ench_damage * attack_cooldown_progress;
-
-        if let Some(strength) = self
-            .living_entity
-            .get_effect(&pumpkin_data::effect::StatusEffect::STRENGTH)
-        {
-            damage += 3.0 * (f64::from(strength.amplifier) + 1.0);
+        let fall_distance = self.living_entity.fall_distance.load();
+        let on_ground = attacker_entity.on_ground.load(Ordering::Relaxed);
+        let fall_flying = attacker_entity.is_fall_flying();
+        let sprinting = attacker_entity.is_sprinting();
+        let mace_smash = item_stack.item.id == pumpkin_data::item::Item::MACE.id
+            && combat::can_mace_smash(fall_distance, fall_flying);
+        let smash_bonus = if mace_smash {
+            combat::mace_smash_bonus(
+                f64::from(fall_distance),
+                crate::enchantment::EnchantmentHelper::modify_fall_based_damage(&item_stack, 0.0),
+            )
+        } else {
+            0.0
+        };
+        let critical_allowed = combat::can_critical_attack(&combat::CriticalAttack {
+            fall_distance,
+            on_ground,
+            on_climbable: self.living_entity.climbing.load(Ordering::Relaxed),
+            in_water: self.living_entity.is_in_water(),
+            blindness: self
+                .living_entity
+                .get_effect(&StatusEffect::BLINDNESS)
+                .is_some(),
+            passenger: attacker_entity.has_vehicle(),
+            target_is_living: victim.get_living_entity().is_some(),
+            sprinting,
+        });
+        let hit = combat::resolve_melee_hit(&combat::MeleeHitInput {
+            attack_damage,
+            attack_strength_scale: scale,
+            enchantment_bonus,
+            bonus_before_crit: smash_bonus,
+            critical_allowed,
+            sprinting,
+        });
+        let sweeping = !is_bedrock
+            && combat::is_sweep_attack(&combat::SweepAttack {
+                full_strength: hit.full_strength,
+                critical: hit.critical,
+                sprint_knockback: hit.sprint_knockback,
+                on_ground,
+                horizontal_speed_sq: attacker_entity.velocity.load().horizontal_length_squared(),
+                movement_speed: self
+                    .living_entity
+                    .get_attribute_value(&Attributes::MOVEMENT_SPEED),
+                holding_sword: SwordItem::enables_sweep(&item_stack),
+            });
+        let attacker_pos = attacker_entity.pos.load();
+        if hit.sprint_knockback {
+            player_attack_sound(&attacker_pos, &world, AttackType::Knockback);
         }
-        if let Some(weakness) = self
-            .living_entity
-            .get_effect(&pumpkin_data::effect::StatusEffect::WEAKNESS)
-        {
-            damage -= 4.0 * (f64::from(weakness.amplifier) + 1.0);
-        }
-        damage = damage.max(0.0);
 
-        let pos = victim_entity.pos.load();
-        let attack_type = AttackType::new(self, attack_cooldown_progress as f32);
-
-        if matches!(attack_type, AttackType::Critical) {
-            damage *= 1.5;
-        }
-
-        let is_mace_smash = matches!(attack_type, AttackType::MaceSmash);
-        if is_mace_smash {
-            let fall_distance = self.living_entity.fall_distance.load();
-            let mut smash_bonus_per_block = 0.0f64;
-            if let Some(enchantments) = item_stack.get_data_component::<EnchantmentsImpl>() {
-                for (enchantment, level) in enchantments.enchantment.iter() {
-                    enchantment.modify_fall_based_damage(*level, &mut smash_bonus_per_block);
-                }
-            }
-            damage += (1.5 + smash_bonus_per_block) * f64::from(fall_distance);
-        }
-
+        let damage_type = if mace_smash {
+            DamageType::MACE_SMASH
+        } else {
+            DamageType::PLAYER_ATTACK
+        };
         if !victim.damage_with_context(
             victim.as_ref(),
-            damage as f32,
-            if is_mace_smash {
-                DamageType::MACE_SMASH
-            } else {
-                DamageType::PLAYER_ATTACK
-            },
+            hit.total_damage.max(0.0),
+            damage_type,
             None,
             Some(self),
             Some(self),
@@ -1443,151 +1439,105 @@ impl Player {
             world.play_sound(
                 Sound::EntityPlayerAttackNodamage,
                 SoundCategory::Players,
-                &self.living_entity.entity.pos.load(),
+                &attacker_pos,
             );
             return;
         }
 
-        if is_mace_smash && damage >= 100.0 {
-            self.trigger_advancement(crate::entity::player::advancement::trigger::AdvancementTrigger::DealtOverkillDamage);
+        if mace_smash && hit.total_damage >= 100.0 {
+            self.trigger_advancement(
+                crate::entity::player::advancement::trigger::AdvancementTrigger::DealtOverkillDamage,
+            );
         }
 
-        if let Some(enchantments) = item_stack.get_data_component::<EnchantmentsImpl>() {
-            for (enchantment, level) in enchantments.enchantment.iter() {
-                for post_effect in enchantment.get_post_attack_effects() {
-                    if post_effect.affected
-                        == Some(pumpkin_data::enchantment::EnchantmentTarget::Victim)
-                        && let pumpkin_data::enchantment::EnchantmentEntityEffect::Ignite {
-                            duration,
-                        } = &post_effect.effect
-                    {
-                        let duration_seconds = duration.calculate(*level);
-                        victim_entity.set_on_fire_for_ticks((duration_seconds * 20.0) as u32);
-                    }
-                }
-            }
+        let extra_knockback = combat::extra_knockback_power(
+            self.living_entity
+                .get_attribute_value(&Attributes::ATTACK_KNOCKBACK),
+            f64::from(Self::melee_enchant_knockback(&item_stack)),
+            hit.sprint_knockback,
+        );
+        if config.knockback {
+            self.push_from_melee(victim.as_ref(), extra_knockback, true);
+        }
+        if sweeping {
+            player_attack_sound(&attacker_pos, &world, AttackType::Sweeping);
+            combat::spawn_sweep_particle(attacker_entity, &world);
+            self.sweep_attack(
+                victim.as_ref(),
+                hit.base_damage,
+                hit.attack_strength_scale,
+                &item_stack,
+                config.knockback,
+            );
         }
 
-        if is_mace_smash {
-            let fall_distance = self.living_entity.fall_distance.load();
+        if hit.critical {
+            player_attack_sound(&attacker_pos, &world, AttackType::Critical);
+            Self::broadcast_hit_animation(
+                &world,
+                victim_entity.entity_id,
+                Animation::CriticalEffect,
+                pumpkin_protocol::bedrock::server::animate::AnimateAction::CriticalHit,
+            );
+        }
+        if !hit.critical && !sweeping {
+            player_attack_sound(
+                &attacker_pos,
+                &world,
+                if hit.full_strength {
+                    AttackType::Strong
+                } else {
+                    AttackType::Weak
+                },
+            );
+        }
+        if hit.magic_boost > 0.0 {
+            Self::broadcast_hit_animation(
+                &world,
+                victim_entity.entity_id,
+                Animation::MagicCriticaleffect,
+                pumpkin_protocol::bedrock::server::animate::AnimateAction::MagicCriticalHit,
+            );
+        }
+
+        self.living_entity
+            .last_attacking_id
+            .store(victim_entity.entity_id, Ordering::Relaxed);
+        self.living_entity.last_attack_time.store(
+            attacker_entity.age.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Self::apply_melee_post_attack(&item_stack, victim_entity);
+
+        if mace_smash {
             self.living_entity.fall_distance.store(0.0);
             if let Some(enchantments) = item_stack.get_data_component::<EnchantmentsImpl>() {
                 for (enchantment, level) in enchantments.enchantment.iter() {
                     if **enchantment == Enchantment::WIND_BURST {
-                        let boost_y = 0.5 + 0.25 * (*level as f64);
-                        let vel = self.living_entity.entity.velocity.load();
-                        self.living_entity
-                            .entity
+                        let boost_y = 0.5 + 0.25 * f64::from(*level);
+                        let vel = attacker_entity.velocity.load();
+                        attacker_entity
                             .velocity
                             .store(Vector3::new(vel.x, boost_y, vel.z));
+                        attacker_entity.velocity_dirty.store(true, Ordering::SeqCst);
                     }
                 }
             }
-            world.play_sound(
-                if fall_distance > 5.0 {
+            let victim_on_ground = victim_entity.on_ground.load(Ordering::Relaxed);
+            if victim_on_ground {
+                let smash_sound = if fall_distance > combat::MACE_SMASH_HEAVY_FALL {
                     Sound::ItemMaceSmashGroundHeavy
                 } else {
                     Sound::ItemMaceSmashGround
-                },
-                SoundCategory::Players,
-                &pos,
-            );
-        }
-
-        player_attack_sound(&pos, &world, attack_type);
-
-        if matches!(attack_type, AttackType::Critical) {
-            let je_packet =
-                CEntityAnimation::new(victim_entity.entity_id.into(), Animation::CriticalEffect);
-            let be_packet = pumpkin_protocol::bedrock::server::animate::SAnimate {
-                action: pumpkin_protocol::bedrock::server::animate::AnimateAction::CriticalHit,
-                target_actor_runtime_id: VarULong(victim_entity.entity_id as u64),
-                data: 0.0,
-                swing_source: None,
-            };
-            world.broadcast_editioned(&je_packet, &be_packet);
-        }
-
-        self.living_entity.last_attacking_id.store(
-            victim_entity.entity_id,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.living_entity.last_attack_time.store(
-            self.living_entity
-                .entity
-                .age
-                .load(std::sync::atomic::Ordering::Relaxed),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        if victim.get_living_entity().is_some() {
-            // Vanilla `Player.attack` adds `LivingEntity.getKnockback()` - the Knockback
-            // enchantment bonus, halved - plus 0.5 for a sprint attack, on top of the base
-            // knockback the victim's damage handling applies. A plain hit adds nothing.
-            // `handle_knockback` halves `strength`, so these are twice the vanilla amount.
-            let mut knockback_strength = f64::from(knockback_level);
-            match attack_type {
-                AttackType::Knockback => knockback_strength += 1.0,
-                AttackType::Sweeping => {
-                    combat::spawn_sweep_particle(attacker_entity, &world, &pos);
-
-                    let mut sweep_damage = 1.0;
-                    if let Some(enchantments) = item_stack.get_data_component::<EnchantmentsImpl>()
-                    {
-                        for (enchantment, level) in enchantments.enchantment.iter() {
-                            if **enchantment == Enchantment::SWEEPING_EDGE {
-                                sweep_damage +=
-                                    damage as f32 * (*level as f32 / (*level as f32 + 1.0));
-                            }
-                        }
-                    }
-
-                    let search_box = BoundingBox::new(
-                        Vector3::new(pos.x - 1.0, pos.y - 0.5, pos.z - 1.0),
-                        Vector3::new(pos.x + 1.0, pos.y + 0.5, pos.z + 1.0),
-                    );
-                    let victims = world.get_all_at_box(&search_box);
-                    for other_victim in victims {
-                        if other_victim.get_entity().entity_id != victim_entity.entity_id
-                            && other_victim.get_entity().entity_id != attacker_entity.entity_id
-                        {
-                            other_victim.damage_with_context(
-                                other_victim.as_ref(),
-                                sweep_damage,
-                                DamageType::PLAYER_ATTACK,
-                                None,
-                                Some(self),
-                                Some(self),
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-            // Vanilla only pushes the victim when the extra knockback is non-zero;
-            // `Entity::knockback` halves the current velocity, so calling it with 0.0
-            // would still slow the victim down.
-            if config.knockback && knockback_strength > 0.0 {
-                combat::handle_knockback(attacker_entity, victim.as_ref(), knockback_strength);
+                };
+                world.play_sound(smash_sound, SoundCategory::Players, &attacker_pos);
+            } else {
+                player_attack_sound(&attacker_pos, &world, AttackType::MaceSmash);
             }
         }
 
-        // NOTE: TOCTOU race condition in single-player context.
-        // The weapon cost is computed (cost = 1 or 2) with item_stack locked, then damage_held_item
-        // re-acquires the lock. In async multi-task scenarios, another task could theoretically
-        // swap the held item between these operations, causing the cost to apply to the wrong item.
-        // Mitigation options (in priority order):
-        // 1. Create damage_held_item_with_lock(&self, item_stack: MutexGuard, amount) variant
-        //    to hold the lock across both computation and application.
-        // 2. Refactor compute cost as a closure: damage_held_item(self, |stack| -> i32 { ... })
-        // 3. In practice, single-player scenarios are safe (this is not multiplayer). Document
-        //    as a known limitation if refactoring is deemed too invasive.
         self.damage_held_item(Self::combat_weapon_durability_cost(&item_stack));
-
-        // Vanilla `Player#attack` ends the successful-hit branch with
-        // `causeFoodExhaustion(0.1F)`. Only landed hits exhaust; the miss/no-damage
-        // case returned early above.
-        self.add_exhaustion(0.1);
+        self.add_exhaustion(combat::MELEE_HIT_EXHAUSTION);
 
         if config.swing {}
     }
@@ -1601,6 +1551,208 @@ impl Player {
         stack
             .get_data_component::<WeaponImpl>()
             .map_or(0, |w| w.item_damage_per_attack as i32)
+    }
+
+    /// Attribute value plus the held item's add-value modifier when that modifier
+    /// is not already on the attribute. Strength and weakness stay in the attribute.
+    fn attack_attribute_value(
+        &self,
+        stack: &ItemStack,
+        attribute: &Attributes,
+        modifier_id: &str,
+    ) -> f64 {
+        let value = self.living_entity.get_attribute_value(attribute);
+        if self.attribute_has_modifier(attribute, modifier_id) {
+            return value;
+        }
+        let Some(modifiers) = stack.get_data_component::<AttributeModifiersImpl>() else {
+            return value;
+        };
+        modifiers
+            .attribute_modifiers
+            .iter()
+            .filter(|modifier| {
+                modifier.id == modifier_id && modifier.operation == Operation::AddValue
+            })
+            .fold(value, |value, modifier| value + modifier.amount)
+    }
+
+    fn attribute_has_modifier(&self, attribute: &Attributes, modifier_id: &str) -> bool {
+        self.living_entity
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&attribute.id)
+            .is_some_and(|instance| {
+                instance
+                    .modifiers
+                    .iter()
+                    .any(|modifier| modifier.id == modifier_id)
+            })
+    }
+
+    fn sweeping_damage_ratio(&self, stack: &ItemStack) -> f64 {
+        const SWEEPING_EDGE_MODIFIER_ID: &str = "minecraft:enchantment.sweeping_edge";
+        let ratio = self
+            .living_entity
+            .get_attribute_value(&Attributes::SWEEPING_DAMAGE_RATIO);
+        if self.attribute_has_modifier(
+            &Attributes::SWEEPING_DAMAGE_RATIO,
+            SWEEPING_EDGE_MODIFIER_ID,
+        ) {
+            return ratio;
+        }
+        ratio + combat::sweeping_edge_ratio(Self::sweeping_edge_level(stack))
+    }
+
+    fn sweeping_edge_level(stack: &ItemStack) -> i32 {
+        let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() else {
+            return 0;
+        };
+        for (enchantment, level) in enchantments.enchantment.iter() {
+            if **enchantment == Enchantment::SWEEPING_EDGE {
+                return *level;
+            }
+        }
+        0
+    }
+
+    fn melee_enchantment_bonus(stack: &ItemStack, victim_type: &EntityType) -> f32 {
+        let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() else {
+            return 0.0;
+        };
+        let mut bonus = 0.0f64;
+        for (enchantment, level) in enchantments.enchantment.iter() {
+            enchantment.modify_damage_against(*level, &mut bonus, Some(victim_type));
+        }
+        bonus as f32
+    }
+
+    fn melee_enchant_knockback(stack: &ItemStack) -> f32 {
+        let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() else {
+            return 0.0;
+        };
+        let mut knockback = 0.0;
+        for (enchantment, level) in enchantments.enchantment.iter() {
+            enchantment.modify_knockback(*level, &mut knockback);
+        }
+        knockback
+    }
+
+    /// Extra or sweep knockback. Damping the attacker is only for the primary hit.
+    fn push_from_melee(&self, victim: &dyn EntityBase, power: f64, damp_attacker: bool) {
+        if power <= 0.0 {
+            return;
+        }
+        let attacker = &self.living_entity.entity;
+        let yaw = attacker.yaw.load();
+        let x = f64::from(yaw.to_radians().sin());
+        let z = f64::from(-yaw.to_radians().cos());
+        if let Some(living) = victim.get_living_entity() {
+            let resistance = living.get_attribute_value(&Attributes::KNOCKBACK_RESISTANCE);
+            victim.get_entity().apply_knockback(
+                combat::knockback_after_resistance(power, resistance),
+                x,
+                z,
+            );
+        }
+        if damp_attacker {
+            let velocity = attacker.velocity.load();
+            attacker.velocity.store(velocity.multiply(0.6, 1.0, 0.6));
+            attacker.velocity_dirty.store(true, Ordering::SeqCst);
+            self.set_sprinting(false);
+        }
+    }
+
+    fn sweep_attack(
+        &self,
+        primary: &dyn EntityBase,
+        base_damage: f32,
+        scale: f32,
+        stack: &ItemStack,
+        apply_knockback: bool,
+    ) {
+        let world = self.world();
+        let attacker_entity = &self.living_entity.entity;
+        let primary_entity = primary.get_entity();
+        let sweep_base = combat::sweep_damage(base_damage, self.sweeping_damage_ratio(stack));
+        let search_box = primary_entity.bounding_box.load().expand(1.0, 0.25, 1.0);
+        for other in world.get_all_at_box(&search_box) {
+            let Some(other_living) = other.get_living_entity() else {
+                continue;
+            };
+            let other_entity = other.get_entity();
+            let distance_sq = attacker_entity
+                .pos
+                .load()
+                .squared_distance_to_vec(&other_entity.pos.load());
+            let allied = (self as &dyn EntityBase).is_allied_to(other.as_ref());
+            if !combat::sweep_hits_entity(
+                attacker_entity.entity_id,
+                primary_entity.entity_id,
+                other_entity.entity_id,
+                allied,
+                distance_sq,
+            ) {
+                continue;
+            }
+            let bonus = Self::melee_enchantment_bonus(stack, other_entity.entity_type);
+            let sweep_damage = combat::enchanted_sweep_damage(sweep_base, bonus, scale);
+            if !other.damage_with_context(
+                other.as_ref(),
+                sweep_damage.max(0.0),
+                DamageType::PLAYER_ATTACK,
+                None,
+                Some(self),
+                Some(self),
+            ) {
+                continue;
+            }
+            if apply_knockback {
+                let resistance =
+                    other_living.get_attribute_value(&Attributes::KNOCKBACK_RESISTANCE);
+                other_entity.apply_knockback(
+                    combat::knockback_after_resistance(combat::SWEEP_KNOCKBACK, resistance),
+                    f64::from(attacker_entity.yaw.load().to_radians().sin()),
+                    f64::from(-attacker_entity.yaw.load().to_radians().cos()),
+                );
+            }
+            Self::apply_melee_post_attack(stack, other_entity);
+        }
+    }
+
+    fn apply_melee_post_attack(stack: &ItemStack, victim: &Entity) {
+        let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() else {
+            return;
+        };
+        for (enchantment, level) in enchantments.enchantment.iter() {
+            for post_effect in enchantment.get_post_attack_effects() {
+                if post_effect.affected
+                    == Some(pumpkin_data::enchantment::EnchantmentTarget::Victim)
+                    && let pumpkin_data::enchantment::EnchantmentEntityEffect::Ignite { duration } =
+                        &post_effect.effect
+                {
+                    let duration_seconds = duration.calculate(*level);
+                    victim.set_on_fire_for_ticks((duration_seconds * 20.0) as u32);
+                }
+            }
+        }
+    }
+
+    fn broadcast_hit_animation(
+        world: &World,
+        victim_id: i32,
+        animation: Animation,
+        action: pumpkin_protocol::bedrock::server::animate::AnimateAction,
+    ) {
+        let je_packet = CEntityAnimation::new(victim_id.into(), animation);
+        let be_packet = pumpkin_protocol::bedrock::server::animate::SAnimate {
+            action,
+            target_actor_runtime_id: VarULong(victim_id as u64),
+            data: 0.0,
+            swing_source: None,
+        };
+        world.broadcast_editioned(&je_packet, &be_packet);
     }
 
     /// Pushes current inventory contents to the client via `CONTAINER_SET_SLOT`.
@@ -2950,6 +3102,11 @@ impl Player {
             }
         }
         self.last_attacked_ticks.fetch_add(1, Ordering::Relaxed);
+        let held_id = self.inventory().held_item().item.id;
+        let previous = self.last_main_hand_item.swap(held_id, Ordering::Relaxed);
+        if previous != held_id {
+            self.last_attacked_ticks.store(0, Ordering::Relaxed);
+        }
 
         self.living_entity.tick(self, server);
 
@@ -3140,11 +3297,12 @@ impl Player {
     }
 
     pub fn get_attack_cooldown_progress(&self, tps: f64, base_time: f64, attack_speed: f64) -> f64 {
-        let x = f64::from(self.last_attacked_ticks.load(Ordering::Acquire)) + base_time;
-
-        let progress_per_tick = tps / attack_speed;
-        let progress = x / progress_per_tick;
-        progress.clamp(0.0, 1.0)
+        f64::from(combat::attack_strength_scale(
+            self.last_attacked_ticks.load(Ordering::Acquire),
+            base_time as f32,
+            attack_speed,
+            tps,
+        ))
     }
 
     pub async fn fire_packet_sent<P: Send + Sync + std::any::Any>(
@@ -4370,14 +4528,16 @@ impl Player {
         source: Option<&dyn crate::entity::EntityBase>,
         cause: Option<&dyn crate::entity::EntityBase>,
     ) -> bool {
-        if self
+        let invulnerable = self
             .abilities
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .invulnerable
-            && damage_type != pumpkin_data::damage::DamageType::GENERIC_KILL
-            && damage_type != pumpkin_data::damage::DamageType::OUT_OF_WORLD
-        {
+            .invulnerable;
+        if combat::invulnerable_ability_blocks(
+            invulnerable,
+            damage_type == DamageType::GENERIC_KILL,
+            damage_type == DamageType::OUT_OF_WORLD,
+        ) {
             return false;
         }
         self.living_entity

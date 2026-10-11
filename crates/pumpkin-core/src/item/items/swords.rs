@@ -1,5 +1,6 @@
 use crate::entity::player::Player;
 use crate::item::{ItemBehaviour, ItemMetadata};
+use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::tag;
 use pumpkin_util::GameMode;
 
@@ -18,5 +19,14 @@ impl ItemBehaviour for SwordItem {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl SwordItem {
+    /// Swords are the held items that can sweep. Damage still comes from the
+    /// attack damage attribute and the cooldown scale, not from this type.
+    #[must_use]
+    pub fn enables_sweep(stack: &ItemStack) -> bool {
+        stack.is_sword()
     }
 }

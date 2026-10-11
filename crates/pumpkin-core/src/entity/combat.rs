@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use crate::entity::EntityBase;
 use pumpkin_data::tag::Taggable;
 use pumpkin_data::{
@@ -9,12 +7,56 @@ use pumpkin_data::{
 };
 use pumpkin_util::math::vector3::Vector3;
 
-use crate::{
-    entity::{Entity, player::Player},
-    world::World,
-};
+use crate::{entity::Entity, world::World};
 
-use crate::net::ClientPlatform;
+/// Game ticks in one vanilla second. Attack cooldown is counted in ticks.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the cooldown tests use the vanilla 20 tick rate; the server passes its own tps"
+    )
+)]
+pub const ATTACK_STRENGTH_TICKS_PER_SECOND: f64 = 20.0;
+/// Added to the attack-strength ticker when a hit is resolved, so a click
+/// lands part-way through the current tick.
+pub const ATTACK_STRENGTH_ADJUST_TICKS: f32 = 0.5;
+/// A hit counts as fully charged when its strength scale is above this.
+pub const FULL_STRENGTH_ATTACK_THRESHOLD: f32 = 0.9;
+/// Constant term of the cooldown damage scale.
+pub const BASE_DAMAGE_SCALE_CONSTANT: f32 = 0.2;
+/// Quadratic term of the cooldown damage scale.
+pub const BASE_DAMAGE_SCALE_QUADRATIC: f32 = 0.8;
+/// Critical hits multiply the cooldown-scaled base damage by this.
+pub const CRITICAL_HIT_MULTIPLIER: f32 = 1.5;
+/// Added to extra knockback after the enchantment bonus has been halved.
+pub const SPRINT_KNOCKBACK_BONUS: f64 = 0.5;
+/// Sweep damage before the sweeping-damage ratio is applied.
+pub const SWEEP_BASE_DAMAGE: f32 = 1.0;
+/// Squared distance from the attacker inside which a sweep can connect.
+pub const SWEEP_REACH_DISTANCE_SQ: f64 = 9.0;
+/// Horizontal speed must stay under `movement_speed *` this to sweep.
+pub const SWEEP_SPEED_FACTOR: f64 = 2.5;
+/// Knockback power a sweep applies to each extra target.
+pub const SWEEP_KNOCKBACK: f64 = 0.4;
+/// Fall distance past which a mace adds smash damage. Elytra flight blocks it.
+pub const MACE_SMASH_FALL_THRESHOLD: f32 = 1.5;
+/// Fall distance past which a smash uses the heavy ground sound.
+pub const MACE_SMASH_HEAVY_FALL: f32 = 5.0;
+/// Blocks of fall that each add 4 smash damage.
+const MACE_SMASH_FIRST_FALL_BAND: f64 = 3.0;
+/// Blocks of fall, after the first band, that each add 2 smash damage.
+const MACE_SMASH_SECOND_FALL_BAND: f64 = 8.0;
+const MACE_SMASH_FIRST_BAND_PER_BLOCK: f64 = 4.0;
+const MACE_SMASH_SECOND_BAND_PER_BLOCK: f64 = 2.0;
+/// Damage added for each block of fall past the second band.
+const MACE_SMASH_REMAINING_PER_BLOCK: f64 = 1.0;
+/// Ticks of hurt invulnerability set by a full hit.
+pub const HURT_COOLDOWN_TICKS: i32 = 20;
+/// While the cooldown is above this, a smaller hit is ignored.
+pub const HURT_COOLDOWN_PARTIAL_THRESHOLD: i32 = 10;
+/// Hunger exhaustion applied by a landed melee hit.
+pub const MELEE_HIT_EXHAUSTION: f32 = 0.1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttackType {
@@ -26,38 +68,243 @@ pub enum AttackType {
     MaceSmash,
 }
 
-impl AttackType {
-    pub fn new(player: &Player, attack_cooldown_progress: f32) -> Self {
-        let entity = &player.get_entity();
+/// Ticks required to fully charge, `(float)(1.0 / attack_speed * ticks_per_second)`.
+#[must_use]
+pub fn attack_strength_delay(attack_speed: f64, ticks_per_second: f64) -> f32 {
+    (1.0 / attack_speed * ticks_per_second) as f32
+}
 
-        let sprinting = entity.is_sprinting();
-        let on_ground = entity.on_ground.load(Ordering::Relaxed);
-        let fall_distance = player.living_entity.fall_distance.load();
-        let held_item = player.inventory().held_item();
-        let is_mace = held_item.item.id == pumpkin_data::item::Item::MACE.id;
-
-        if is_mace && !on_ground && fall_distance > 1.5 {
-            return Self::MaceSmash;
-        }
-
-        let sword = held_item.is_sword();
-        let is_bedrock = matches!(player.client.as_ref(), ClientPlatform::Bedrock(_));
-
-        let is_strong = attack_cooldown_progress > 0.9;
-        if sprinting && is_strong {
-            return Self::Knockback;
-        }
-
-        if is_strong && !on_ground && fall_distance > 0.0 {
-            return Self::Critical;
-        }
-
-        if sword && is_strong && !is_bedrock {
-            return Self::Sweeping;
-        }
-
-        if is_strong { Self::Strong } else { Self::Weak }
+/// `(ticks + adjust) / delay`, clamped to `0..=1`.
+#[must_use]
+pub fn attack_strength_scale(
+    ticks_since_attack: u32,
+    adjust_ticks: f32,
+    attack_speed: f64,
+    ticks_per_second: f64,
+) -> f32 {
+    if attack_speed <= 0.0 {
+        return 0.0;
     }
+    let delay = attack_strength_delay(attack_speed, ticks_per_second);
+    if delay <= 0.0 {
+        return 1.0;
+    }
+    ((ticks_since_attack as f32 + adjust_ticks) / delay).clamp(0.0, 1.0)
+}
+
+/// `0.2 + scale² * 0.8`. A full charge returns 1.
+#[must_use]
+pub fn base_damage_scale_factor(scale: f32) -> f32 {
+    BASE_DAMAGE_SCALE_CONSTANT + scale * scale * BASE_DAMAGE_SCALE_QUADRATIC
+}
+
+/// Inputs for one player melee swing, after attributes and enchantments are read.
+#[derive(Debug, Clone, Copy)]
+pub struct MeleeHitInput {
+    /// `ATTACK_DAMAGE`, including the held weapon and strength or weakness.
+    pub attack_damage: f64,
+    /// Result of [`attack_strength_scale`]. Bedrock passes 1.
+    pub attack_strength_scale: f32,
+    /// Extra damage from sharpness, smite, and bane, before cooldown scaling.
+    pub enchantment_bonus: f32,
+    /// Added to the cooldown-scaled base before a critical hit multiplies it.
+    /// A mace smash uses this. Enchantment damage does not.
+    pub bonus_before_crit: f32,
+    /// Physical crit conditions already hold: falling, not climbing, not wet,
+    /// not blind, not riding, the target is living, and the attacker is not sprinting.
+    pub critical_allowed: bool,
+    pub sprinting: bool,
+}
+
+/// Damage split the way a player swing applies it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeleeHit {
+    /// Cooldown-scaled attribute damage, after the critical multiplier.
+    pub base_damage: f32,
+    /// Enchantment bonus multiplied by the strength scale, not by a crit.
+    pub magic_boost: f32,
+    pub total_damage: f32,
+    pub attack_strength_scale: f32,
+    pub full_strength: bool,
+    pub critical: bool,
+    pub sprint_knockback: bool,
+}
+
+/// Scales attribute damage by the attack cooldown, then crits that portion
+/// and adds the enchantment bonus scaled only by the strength scale.
+#[must_use]
+pub fn resolve_melee_hit(input: &MeleeHitInput) -> MeleeHit {
+    let scale = input.attack_strength_scale.clamp(0.0, 1.0);
+    let mut base_damage = (input.attack_damage as f32) * base_damage_scale_factor(scale);
+    let magic_boost = scale * input.enchantment_bonus;
+    let full_strength = scale > FULL_STRENGTH_ATTACK_THRESHOLD;
+    let critical = input.critical_allowed && full_strength;
+    base_damage += input.bonus_before_crit;
+    if critical {
+        base_damage *= CRITICAL_HIT_MULTIPLIER;
+    }
+    MeleeHit {
+        base_damage,
+        magic_boost,
+        total_damage: base_damage + magic_boost,
+        attack_strength_scale: scale,
+        full_strength,
+        critical,
+        sprint_knockback: input.sprinting && full_strength,
+    }
+}
+
+/// State checked for a falling melee crit.
+#[derive(Debug, Clone, Copy)]
+pub struct CriticalAttack {
+    pub fall_distance: f32,
+    pub on_ground: bool,
+    pub on_climbable: bool,
+    pub in_water: bool,
+    pub blindness: bool,
+    pub passenger: bool,
+    pub target_is_living: bool,
+    pub sprinting: bool,
+}
+
+/// Falling melee crit. Sprinting, blindness, water, climbing, and riding block it.
+#[must_use]
+pub const fn can_critical_attack(attack: &CriticalAttack) -> bool {
+    attack.fall_distance > 0.0
+        && !attack.on_ground
+        && !attack.on_climbable
+        && !attack.in_water
+        && !attack.blindness
+        && !attack.passenger
+        && attack.target_is_living
+        && !attack.sprinting
+}
+
+/// State checked for a sword sweep.
+#[derive(Debug, Clone, Copy)]
+pub struct SweepAttack {
+    pub full_strength: bool,
+    pub critical: bool,
+    pub sprint_knockback: bool,
+    pub on_ground: bool,
+    pub horizontal_speed_sq: f64,
+    pub movement_speed: f64,
+    pub holding_sword: bool,
+}
+
+/// A sword sweep: full charge, on the ground, not a crit, not a sprint hit,
+/// and horizontal speed under `movement_speed * 2.5`.
+#[must_use]
+pub fn is_sweep_attack(attack: &SweepAttack) -> bool {
+    if attack.full_strength
+        && !attack.critical
+        && !attack.sprint_knockback
+        && attack.on_ground
+        && attack.holding_sword
+    {
+        let max_speed = attack.movement_speed * SWEEP_SPEED_FACTOR;
+        attack.horizontal_speed_sq < max_speed * max_speed
+    } else {
+        false
+    }
+}
+
+/// `1 + sweeping_damage_ratio * base_damage`. `base_damage` is post-crit and
+/// does not include the enchantment bonus.
+#[must_use]
+pub fn sweep_damage(base_damage: f32, sweeping_ratio: f64) -> f32 {
+    SWEEP_BASE_DAMAGE + (sweeping_ratio as f32) * base_damage
+}
+
+/// Sweeping Edge's attribute amount: `level / (level + 1)`.
+#[must_use]
+pub fn sweeping_edge_ratio(level: i32) -> f64 {
+    if level <= 0 {
+        return 0.0;
+    }
+    let level = f64::from(level);
+    level / (level + 1.0)
+}
+
+/// Enchantment bonus on a sweep is added to the sweep base, then multiplied
+/// by the attack strength scale.
+#[must_use]
+pub fn enchanted_sweep_damage(sweep_base: f32, enchantment_bonus: f32, scale: f32) -> f32 {
+    (sweep_base + enchantment_bonus) * scale
+}
+
+/// Whether a nearby living entity is inside the sweep. The attacker and the
+/// primary target are never hit.
+#[must_use]
+pub fn sweep_hits_entity(
+    attacker_id: i32,
+    primary_id: i32,
+    other_id: i32,
+    allied: bool,
+    distance_sq: f64,
+) -> bool {
+    other_id != attacker_id
+        && other_id != primary_id
+        && !allied
+        && distance_sq < SWEEP_REACH_DISTANCE_SQ
+}
+
+/// Power passed to living knockback. The attack-knockback attribute and the
+/// enchantment bonus are halved together; a sprint hit then adds `0.5`.
+#[must_use]
+pub fn extra_knockback_power(attack_knockback: f64, enchant_knockback: f64, sprint: bool) -> f64 {
+    let mut power = f64::midpoint(attack_knockback, enchant_knockback);
+    if sprint {
+        power += SPRINT_KNOCKBACK_BONUS;
+    }
+    power
+}
+
+/// Result of comparing a new hit with the hurt cooldown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HurtCooldownResult {
+    /// Pre-armor damage to run through armor and magic. On a partial hit this
+    /// is only the amount above the previous hit.
+    pub damage_to_apply: f32,
+    /// New stored hit, still the pre-armor incoming amount.
+    pub last_hurt: f32,
+    pub cooldown_ticks: i32,
+    /// A full hit plays the hurt sound and the default knockback.
+    pub full_hit: bool,
+}
+
+/// Hurt invulnerability. `None` means the hit is no stronger than the one
+/// still in the cooldown window, so it deals nothing.
+#[must_use]
+pub fn resolve_hurt_cooldown(
+    incoming: f32,
+    cooldown_ticks: i32,
+    last_hurt: f32,
+    bypasses_cooldown: bool,
+) -> Option<HurtCooldownResult> {
+    if cooldown_ticks > HURT_COOLDOWN_PARTIAL_THRESHOLD && !bypasses_cooldown {
+        if incoming <= last_hurt {
+            return None;
+        }
+        return Some(HurtCooldownResult {
+            damage_to_apply: incoming - last_hurt,
+            last_hurt: incoming,
+            cooldown_ticks,
+            full_hit: false,
+        });
+    }
+    Some(HurtCooldownResult {
+        damage_to_apply: incoming,
+        last_hurt: incoming,
+        cooldown_ticks: HURT_COOLDOWN_TICKS,
+        full_hit: true,
+    })
+}
+
+/// Creative and spectator abilities block ordinary damage. Kill and void still land.
+#[must_use]
+pub const fn invulnerable_ability_blocks(invulnerable: bool, is_kill: bool, is_void: bool) -> bool {
+    invulnerable && !is_kill && !is_void
 }
 
 /// Scales a knockback `strength` by a living entity's knockback resistance,
@@ -86,21 +333,46 @@ pub fn handle_knockback(attacker: &Entity, victim: &dyn EntityBase, strength: f6
     attacker.velocity.store(velocity.multiply(0.6, 1.0, 0.6));
 }
 
-pub fn spawn_sweep_particle(attacker_entity: &Entity, world: &World, pos: &Vector3<f64>) {
+pub fn spawn_sweep_particle(attacker_entity: &Entity, world: &World) {
     let yaw = attacker_entity.yaw.load();
-    let d = -f64::from((yaw.to_radians()).sin());
-    let e = f64::from((yaw.to_radians()).cos());
-
-    let scale = 0.5;
-    let body_y = f64::from(attacker_entity.height()).mul_add(scale, pos.y);
+    let dx = -f64::from(yaw.to_radians().sin());
+    let dz = f64::from(yaw.to_radians().cos());
+    let pos = attacker_entity.pos.load();
+    let body_y = f64::from(attacker_entity.height()).mul_add(0.5, pos.y);
 
     world.spawn_particle(
-        Vector3::new(pos.x + d, body_y, pos.z + e),
-        Vector3::new(0.0, 0.0, 0.0),
+        Vector3::new(pos.x + dx, body_y, pos.z + dz),
+        Vector3::new(dx as f32, 0.0, dz as f32),
         0.0,
         0,
         Particle::SweepAttack,
     );
+}
+
+/// A mace smash connects when the fall is past the threshold and the attacker
+/// is not gliding.
+#[must_use]
+pub fn can_mace_smash(fall_distance: f32, fall_flying: bool) -> bool {
+    fall_distance > MACE_SMASH_FALL_THRESHOLD && !fall_flying
+}
+
+/// Smash damage from fall distance, plus a per-block density enchantment.
+/// The first three blocks add 4 each, the next five add 2, and the rest add 1.
+#[must_use]
+pub fn mace_smash_bonus(fall_distance: f64, density_per_block: f64) -> f32 {
+    let first_band = MACE_SMASH_FIRST_BAND_PER_BLOCK * MACE_SMASH_FIRST_FALL_BAND;
+    let height = if fall_distance <= MACE_SMASH_FIRST_FALL_BAND {
+        MACE_SMASH_FIRST_BAND_PER_BLOCK * fall_distance
+    } else if fall_distance <= MACE_SMASH_SECOND_FALL_BAND {
+        first_band + MACE_SMASH_SECOND_BAND_PER_BLOCK * (fall_distance - MACE_SMASH_FIRST_FALL_BAND)
+    } else {
+        let second_band = MACE_SMASH_SECOND_BAND_PER_BLOCK
+            * (MACE_SMASH_SECOND_FALL_BAND - MACE_SMASH_FIRST_FALL_BAND);
+        first_band
+            + second_band
+            + MACE_SMASH_REMAINING_PER_BLOCK * (fall_distance - MACE_SMASH_SECOND_FALL_BAND)
+    };
+    (height + density_per_block * fall_distance) as f32
 }
 
 pub fn player_attack_sound(pos: &Vector3<f64>, world: &World, attack_type: AttackType) {
@@ -652,5 +924,302 @@ mod tests {
         // Stacked armour modifiers can push resistance above 1.0; the result is
         // negative and callers guard on `strength > 0.0`.
         assert!(knockback_after_resistance(0.4, 1.2) < 0.0);
+    }
+
+    /// Player base attack speed 4 plus the wooden sword's `base_attack_speed` modifier.
+    fn wooden_sword_attack_speed() -> f64 {
+        4.0 + -2.400_000_095_367_431_6
+    }
+
+    /// Player base attack damage 1 plus the wooden sword's `base_attack_damage` of 3.
+    const WOODEN_SWORD_DAMAGE: f64 = 4.0;
+
+    fn wooden_hit(
+        ticks: u32,
+        enchantment_bonus: f32,
+        critical_allowed: bool,
+        sprinting: bool,
+    ) -> MeleeHit {
+        let scale = attack_strength_scale(
+            ticks,
+            ATTACK_STRENGTH_ADJUST_TICKS,
+            wooden_sword_attack_speed(),
+            ATTACK_STRENGTH_TICKS_PER_SECOND,
+        );
+        resolve_melee_hit(&MeleeHitInput {
+            attack_damage: WOODEN_SWORD_DAMAGE,
+            attack_strength_scale: scale,
+            enchantment_bonus,
+            bonus_before_crit: 0.0,
+            critical_allowed,
+            sprinting,
+        })
+    }
+
+    #[test]
+    fn wooden_sword_full_charge_deals_attack_damage() {
+        // 13 ticks is the first count where `(ticks + 0.5) / delay` reaches 1.
+        // The delay is the float cast of `20 / 1.6`, which is slightly over 12.5.
+        let hit = wooden_hit(13, 0.0, false, false);
+        assert_eq!(hit.attack_strength_scale, 1.0);
+        assert_eq!(hit.total_damage, 4.0);
+        let health = 20.0 - hit.total_damage;
+        assert_eq!(health, 16.0);
+    }
+
+    #[test]
+    fn wooden_sword_twelve_ticks_is_not_quite_full() {
+        let hit = wooden_hit(12, 0.0, false, false);
+        assert!(hit.attack_strength_scale < 1.0);
+        assert!(hit.total_damage < 4.0);
+        assert!(hit.full_strength);
+    }
+
+    #[test]
+    fn immediate_second_hit_deals_the_reduced_fraction() {
+        let hit = wooden_hit(0, 0.0, false, false);
+        // (0 + 0.5) / delay ≈ 0.04, then `0.2 + scale² * 0.8` ≈ 0.20128, times 4.
+        assert!((hit.total_damage - 0.805_12).abs() < 1e-4);
+        assert!(hit.total_damage < WOODEN_SWORD_DAMAGE as f32);
+        assert!(!hit.full_strength);
+    }
+
+    #[test]
+    fn leather_chest_reduces_a_full_wooden_hit() {
+        // Leather chestplate is 3 armor and 0 toughness.
+        let dealt = CombatRules::get_damage_after_absorb(4.0, 3.0, 0.0, 0);
+        assert!((dealt - 3.84).abs() < 1e-5);
+        let health = 20.0 - dealt;
+        assert!((health - 16.16).abs() < 1e-4);
+    }
+
+    #[test]
+    fn immediate_second_hit_is_rejected_during_invulnerability() {
+        let second = wooden_hit(0, 0.0, false, false);
+        let rejected = resolve_hurt_cooldown(second.total_damage, 19, 4.0, false);
+        assert!(rejected.is_none());
+    }
+
+    #[test]
+    fn stronger_hit_during_invulnerability_applies_only_the_excess() {
+        let partial = resolve_hurt_cooldown(6.0, 15, 4.0, false).expect("larger hit connects");
+        assert!(!partial.full_hit);
+        assert_eq!(partial.damage_to_apply, 2.0);
+        assert_eq!(partial.last_hurt, 6.0);
+        assert_eq!(partial.cooldown_ticks, 15);
+        let dealt = CombatRules::get_damage_after_absorb(partial.damage_to_apply, 3.0, 0.0, 0);
+        assert!((dealt - 1.84).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hurt_cooldown_at_ten_ticks_accepts_a_full_hit() {
+        let again = resolve_hurt_cooldown(4.0, 10, 4.0, false).expect("cooldown elapsed");
+        assert!(again.full_hit);
+        assert_eq!(again.damage_to_apply, 4.0);
+        assert_eq!(again.cooldown_ticks, HURT_COOLDOWN_TICKS);
+    }
+
+    #[test]
+    fn kill_damage_bypasses_the_hurt_cooldown() {
+        let kill = resolve_hurt_cooldown(1.0, 19, 4.0, true).expect("bypass");
+        assert!(kill.full_hit);
+        assert_eq!(kill.damage_to_apply, 1.0);
+    }
+
+    #[test]
+    fn critical_hit_does_not_multiply_sharpness() {
+        // Full charge, sharpness I (+1), falling crit. Base 4 * 1.5, then +1.
+        let hit = wooden_hit(13, 1.0, true, false);
+        assert!(hit.critical);
+        assert_eq!(hit.base_damage, 6.0);
+        assert_eq!(hit.magic_boost, 1.0);
+        assert_eq!(hit.total_damage, 7.0);
+    }
+
+    #[test]
+    fn sharpness_on_a_half_charge_scales_linearly() {
+        let scale = 0.5;
+        let hit = resolve_melee_hit(&MeleeHitInput {
+            attack_damage: WOODEN_SWORD_DAMAGE,
+            attack_strength_scale: scale,
+            enchantment_bonus: 1.0,
+            bonus_before_crit: 0.0,
+            critical_allowed: false,
+            sprinting: false,
+        });
+        assert!((hit.base_damage - 1.6).abs() < 1e-5);
+        assert_eq!(hit.magic_boost, 0.5);
+        assert!((hit.total_damage - 2.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn strength_is_already_inside_attack_damage() {
+        // Wooden sword 4 plus strength I (+3) is 7, not 7 plus another 3.
+        let scale = attack_strength_scale(
+            13,
+            ATTACK_STRENGTH_ADJUST_TICKS,
+            wooden_sword_attack_speed(),
+            ATTACK_STRENGTH_TICKS_PER_SECOND,
+        );
+        let hit = resolve_melee_hit(&MeleeHitInput {
+            attack_damage: 7.0,
+            attack_strength_scale: scale,
+            enchantment_bonus: 0.0,
+            bonus_before_crit: 0.0,
+            critical_allowed: false,
+            sprinting: false,
+        });
+        assert_eq!(hit.total_damage, 7.0);
+    }
+
+    #[test]
+    fn sweeping_edge_ratio_matches_the_enchantment_fraction() {
+        assert_eq!(sweeping_edge_ratio(0), 0.0);
+        assert_eq!(sweeping_edge_ratio(1), 0.5);
+        assert!((sweeping_edge_ratio(2) - 2.0 / 3.0).abs() < 1e-12);
+        assert_eq!(sweeping_edge_ratio(3), 0.75);
+        assert_eq!(sweep_damage(4.0, 0.0), 1.0);
+        assert_eq!(sweep_damage(4.0, 0.5), 3.0);
+        assert_eq!(sweep_damage(4.0, 0.75), 4.0);
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "each flag is one sweep condition"
+    )]
+    fn sweep(
+        full_strength: bool,
+        critical: bool,
+        sprint_knockback: bool,
+        on_ground: bool,
+        horizontal_speed_sq: f64,
+        holding_sword: bool,
+    ) -> bool {
+        is_sweep_attack(&SweepAttack {
+            full_strength,
+            critical,
+            sprint_knockback,
+            on_ground,
+            horizontal_speed_sq,
+            movement_speed: 0.1,
+            holding_sword,
+        })
+    }
+
+    #[test]
+    fn sweep_requires_a_grounded_full_sword_hit() {
+        assert!(sweep(true, false, false, true, 0.0, true));
+        assert!(!sweep(true, true, false, true, 0.0, true));
+        assert!(!sweep(true, false, true, true, 0.0, true));
+        assert!(!sweep(true, false, false, false, 0.0, true));
+        assert!(!sweep(false, false, false, true, 0.0, true));
+        assert!(!sweep(true, false, false, true, 0.0, false));
+        // movement speed 0.1 * 2.5 = 0.25, squared 0.0625.
+        assert!(!sweep(true, false, false, true, 0.07, true));
+    }
+
+    #[test]
+    fn sweep_does_not_hit_the_attacker() {
+        assert!(!sweep_hits_entity(1, 2, 1, false, 1.0));
+        assert!(!sweep_hits_entity(1, 2, 2, false, 1.0));
+        assert!(!sweep_hits_entity(1, 2, 3, true, 1.0));
+        assert!(!sweep_hits_entity(1, 2, 3, false, 9.0));
+        assert!(sweep_hits_entity(1, 2, 3, false, 8.9));
+    }
+
+    #[test]
+    fn sprint_and_knockback_enchant_share_one_power() {
+        assert_eq!(extra_knockback_power(0.0, 0.0, false), 0.0);
+        assert_eq!(extra_knockback_power(0.0, 1.0, false), 0.5);
+        assert_eq!(extra_knockback_power(0.0, 2.0, false), 1.0);
+        assert_eq!(extra_knockback_power(0.0, 0.0, true), 0.5);
+        assert_eq!(extra_knockback_power(0.0, 1.0, true), 1.0);
+        assert_eq!(extra_knockback_power(0.0, 2.0, true), 1.5);
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "each flag is one critical-hit condition"
+    )]
+    fn crit(
+        fall_distance: f32,
+        on_ground: bool,
+        in_water: bool,
+        blindness: bool,
+        target_is_living: bool,
+        sprinting: bool,
+    ) -> bool {
+        can_critical_attack(&CriticalAttack {
+            fall_distance,
+            on_ground,
+            on_climbable: false,
+            in_water,
+            blindness,
+            passenger: false,
+            target_is_living,
+            sprinting,
+        })
+    }
+
+    #[test]
+    fn critical_attack_is_blocked_by_sprint_water_and_blindness() {
+        assert!(crit(0.1, false, false, false, true, false));
+        assert!(!crit(0.1, false, false, false, true, true));
+        assert!(!crit(0.1, true, false, false, true, false));
+        assert!(!crit(0.1, false, true, false, true, false));
+        assert!(!crit(0.1, false, false, true, true, false));
+        assert!(!crit(0.0, false, false, false, true, false));
+        assert!(!crit(0.1, false, false, false, false, false));
+    }
+
+    #[test]
+    fn creative_invulnerability_blocks_ordinary_hits() {
+        assert!(invulnerable_ability_blocks(true, false, false));
+        assert!(!invulnerable_ability_blocks(true, true, false));
+        assert!(!invulnerable_ability_blocks(true, false, true));
+        assert!(!invulnerable_ability_blocks(false, false, false));
+    }
+
+    #[test]
+    fn fist_full_charge_is_one_damage_after_five_ticks() {
+        let scale = attack_strength_scale(5, ATTACK_STRENGTH_ADJUST_TICKS, 4.0, 20.0);
+        assert_eq!(scale, 1.0);
+        let hit = resolve_melee_hit(&MeleeHitInput {
+            attack_damage: 1.0,
+            attack_strength_scale: scale,
+            enchantment_bonus: 0.0,
+            bonus_before_crit: 0.0,
+            critical_allowed: false,
+            sprinting: false,
+        });
+        assert_eq!(hit.total_damage, 1.0);
+    }
+
+    #[test]
+    fn mace_smash_bonus_follows_the_fall_bands() {
+        assert_eq!(mace_smash_bonus(2.0, 0.0), 8.0);
+        assert_eq!(mace_smash_bonus(3.0, 0.0), 12.0);
+        assert_eq!(mace_smash_bonus(4.0, 0.0), 14.0);
+        assert_eq!(mace_smash_bonus(8.0, 0.0), 22.0);
+        assert_eq!(mace_smash_bonus(9.0, 0.0), 23.0);
+        assert_eq!(mace_smash_bonus(2.0, 1.0), 10.0);
+        assert!(!can_mace_smash(MACE_SMASH_FALL_THRESHOLD, false));
+        assert!(can_mace_smash(1.6, false));
+        assert!(!can_mace_smash(4.0, true));
+    }
+
+    #[test]
+    fn critical_hit_multiplies_the_smash_bonus_and_not_sharpness() {
+        let hit = resolve_melee_hit(&MeleeHitInput {
+            attack_damage: WOODEN_SWORD_DAMAGE,
+            attack_strength_scale: 1.0,
+            enchantment_bonus: 1.0,
+            bonus_before_crit: 8.0,
+            critical_allowed: true,
+            sprinting: false,
+        });
+        assert_eq!(hit.base_damage, 18.0);
+        assert_eq!(hit.magic_boost, 1.0);
+        assert_eq!(hit.total_damage, 19.0);
     }
 }

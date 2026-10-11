@@ -30,7 +30,9 @@ use crate::entity::ageable::AgeableMob;
 use crate::entity::attributes::AttributeInstance;
 use crate::entity::attributes::Modifier;
 use crate::entity::attributes::ModifierOperation;
-use crate::entity::combat::{CombatRules, CombatTracker, FallLocation, knockback_after_resistance};
+use crate::entity::combat::{
+    self, CombatRules, CombatTracker, FallLocation, knockback_after_resistance,
+};
 use crate::entity::mob::equipment::DEFAULT_EQUIPMENT_DROP_CHANCE;
 use crate::entity::player::statistics::{CustomStatistic, StatisticCategory};
 use crate::server::Server;
@@ -495,17 +497,26 @@ impl LivingEntity {
                 .attributes
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (attribute, modifiers) in [
-                (Attributes::ATTACK_SPEED, speed_modifiers),
-                (Attributes::ATTACK_DAMAGE, damage_modifiers),
+            for (attribute, modifiers, base_id) in [
+                (
+                    Attributes::ATTACK_SPEED,
+                    speed_modifiers,
+                    "minecraft:base_attack_speed",
+                ),
+                (
+                    Attributes::ATTACK_DAMAGE,
+                    damage_modifiers,
+                    "minecraft:base_attack_damage",
+                ),
             ] {
                 let instance = attributes
                     .entry(attribute.id)
                     .or_insert_with(|| AttributeInstance::new(attribute.default_value));
-                if instance.modifiers == modifiers {
+                let merged = Self::merge_weapon_modifiers(&instance.modifiers, &modifiers, base_id);
+                if instance.modifiers == merged {
                     continue;
                 }
-                instance.modifiers = modifiers;
+                instance.modifiers = merged;
                 instance.dirty.store(true, Ordering::Relaxed);
                 changed.push(attribute);
             }
@@ -513,6 +524,25 @@ impl LivingEntity {
         if !changed.is_empty() {
             crate::entity::attributes::send_attribute_updates_for_living(self, changed);
         }
+    }
+
+    /// Replaces the held weapon's attack modifiers and drops a stale base-attack
+    /// id, leaving effect modifiers such as strength in place.
+    fn merge_weapon_modifiers(
+        existing: &[Modifier],
+        weapon: &[Modifier],
+        base_id: &str,
+    ) -> Vec<Modifier> {
+        let mut merged = Vec::with_capacity(existing.len() + weapon.len());
+        for modifier in existing {
+            let replaced = weapon.iter().any(|next| next.id == modifier.id);
+            if replaced || modifier.id == base_id {
+                continue;
+            }
+            merged.push(modifier.clone());
+        }
+        merged.extend(weapon.iter().cloned());
+        merged
     }
 
     /// Applies item `attribute_modifiers` for the given slots and notifies clients.
@@ -3109,37 +3139,37 @@ impl LivingEntity {
             }
         }
 
-        // Vanilla parity: 1. Armor absorb
-        let damage_after_armor =
-            self.get_damage_after_armor_absorb(amount, &damage_type, cause.or(source));
+        // Hurt cooldown compares the pre-armor amount. Armor and magic then
+        // run on whatever is left, which is the full hit or only the excess.
+        let bypasses_cooldown =
+            damage_type == DamageType::GENERIC_KILL || damage_type == DamageType::OUT_OF_WORLD;
+        let Some(cooldown) = combat::resolve_hurt_cooldown(
+            amount,
+            self.hurt_cooldown.load(Relaxed),
+            self.last_damage_taken.load(),
+            bypasses_cooldown,
+        ) else {
+            return false;
+        };
+        if cooldown.full_hit {
+            self.hurt_cooldown.store(cooldown.cooldown_ticks, Relaxed);
+        }
+        self.last_damage_taken.store(cooldown.last_hurt);
 
+        let damage_after_armor = self.get_damage_after_armor_absorb(
+            cooldown.damage_to_apply,
+            &damage_type,
+            cause.or(source),
+        );
         let effective_amount = self.get_damage_after_magic_absorb(
             damage_after_armor,
             &damage_type,
             caller,
             cause.or(source),
         );
-
-        // These damage types bypass the hurt cooldown and death protection
-        let bypasses_cooldown_protection =
-            damage_type == DamageType::GENERIC_KILL || damage_type == DamageType::OUT_OF_WORLD;
-
-        // Apply hurt cooldown logic
-        let last_damage = self.last_damage_taken.load();
-        let (damage_amount, play_sound) =
-            if self.hurt_cooldown.load(Relaxed) > 10 && !bypasses_cooldown_protection {
-                if effective_amount <= last_damage {
-                    return false;
-                }
-                (effective_amount - last_damage, false)
-            } else {
-                self.hurt_cooldown.store(20, Relaxed);
-                (effective_amount, self.health.load() > effective_amount)
-            };
-
-        // Finalize state
-        self.last_damage_taken.store(amount);
-        let damage_amount = damage_amount.max(0.0);
+        let damage_amount = effective_amount.max(0.0);
+        let full_hit = cooldown.full_hit;
+        let play_sound = full_hit && self.health.load() > damage_amount;
 
         // Record the source once the hit is confirmed.
         *self
@@ -3190,16 +3220,21 @@ impl LivingEntity {
                 1.0,
                 self.get_pitch(),
             );
+        }
 
-            if let Some(source) = source {
-                let source_pos = source.get_entity().pos.load();
-                let target_pos = self.entity.pos.load();
-                let dx = source_pos.x - target_pos.x;
-                let dz = source_pos.z - target_pos.z;
-                let resistance = self.get_attribute_value(&Attributes::KNOCKBACK_RESISTANCE);
-                self.entity
-                    .apply_knockback(knockback_after_resistance(0.4, resistance), dx, dz);
-            }
+        // Default attack knockback of 0.4. A partial hit inside the cooldown
+        // window does not push, and a killing blow still does.
+        if config.knockback
+            && full_hit
+            && let Some(source) = source
+        {
+            let source_pos = source.get_entity().pos.load();
+            let target_pos = self.entity.pos.load();
+            let dx = source_pos.x - target_pos.x;
+            let dz = source_pos.z - target_pos.z;
+            let resistance = self.get_attribute_value(&Attributes::KNOCKBACK_RESISTANCE);
+            self.entity
+                .apply_knockback(knockback_after_resistance(0.4, resistance), dx, dz);
         }
 
         // Vanilla parity: actuallyHurt
@@ -4055,5 +4090,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(bytes, [10, 17, 1, 28, 0xff, 0xcd, 0x5c, 0xab]);
+    }
+
+    #[test]
+    fn weapon_modifier_merge_keeps_strength() {
+        let strength = Modifier {
+            id: "minecraft:effect.strength".to_string(),
+            amount: 3.0,
+            operation: ModifierOperation::Add,
+        };
+        let old_sword = Modifier {
+            id: "minecraft:base_attack_damage".to_string(),
+            amount: 3.0,
+            operation: ModifierOperation::Add,
+        };
+        let new_sword = Modifier {
+            id: "minecraft:base_attack_damage".to_string(),
+            amount: 6.0,
+            operation: ModifierOperation::Add,
+        };
+        let merged = LivingEntity::merge_weapon_modifiers(
+            &[strength, old_sword],
+            &[new_sword],
+            "minecraft:base_attack_damage",
+        );
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "minecraft:effect.strength");
+        assert_eq!(merged[0].amount, 3.0);
+        assert_eq!(merged[1].id, "minecraft:base_attack_damage");
+        assert_eq!(merged[1].amount, 6.0);
     }
 }
