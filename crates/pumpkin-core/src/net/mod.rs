@@ -75,6 +75,31 @@ pub fn offline_uuid(username: &str) -> Result<Uuid, uuid::Error> {
     Uuid::from_slice(&Sha256::digest(username)[..16])
 }
 
+/// Particles the client asked for, matching vanilla `ParticleStatus`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParticleStatus {
+    /// All particles. Wire id 0.
+    All,
+    /// Decreased particles. Wire id 1.
+    Decreased,
+    /// Minimal particles. Wire id 2.
+    Minimal,
+}
+
+impl ParticleStatus {
+    /// Resolves a client-information particle-status id.
+    ///
+    /// Ids outside `0..=2` wrap, which is how the vanilla lookup treats them.
+    #[must_use]
+    pub const fn from_id(id: i32) -> Self {
+        match id.rem_euclid(3) {
+            1 => Self::Decreased,
+            2 => Self::Minimal,
+            _ => Self::All,
+        }
+    }
+}
+
 /// Represents a player's configuration settings.
 ///
 /// This struct contains various options that can be customized by the player, affecting their gameplay experience.
@@ -100,6 +125,8 @@ pub struct PlayerConfig {
     pub text_filtering: bool,
     /// Whether the player wants to appear in the server list.
     pub server_listing: bool,
+    /// How many particles this client wants.
+    pub particle_status: ParticleStatus,
 }
 
 impl Default for PlayerConfig {
@@ -113,6 +140,7 @@ impl Default for PlayerConfig {
             main_hand: Hand::Right,
             text_filtering: false,
             server_listing: false,
+            particle_status: ParticleStatus::All,
         }
     }
 }
@@ -729,5 +757,16 @@ mod tests {
         // Underflow protection: decrementing more than current value should clamp to 0
         decrement_pending_bytes(&counter, 100);
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn particle_status_ids() {
+        use super::ParticleStatus;
+
+        assert_eq!(ParticleStatus::from_id(0), ParticleStatus::All);
+        assert_eq!(ParticleStatus::from_id(1), ParticleStatus::Decreased);
+        assert_eq!(ParticleStatus::from_id(2), ParticleStatus::Minimal);
+        assert_eq!(ParticleStatus::from_id(3), ParticleStatus::All);
+        assert_eq!(ParticleStatus::from_id(-1), ParticleStatus::Minimal);
     }
 }
