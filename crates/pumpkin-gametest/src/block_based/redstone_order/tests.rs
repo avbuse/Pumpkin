@@ -4,7 +4,7 @@
 //! block events, then block-entity ticks. Fluid ticks are left queued.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use arc_swap::ArcSwap;
 use pumpkin_config::lighting::LightingEngineConfig;
@@ -14,6 +14,7 @@ use pumpkin_core::block::registry::default_registry;
 use pumpkin_core::block::{BlockBehaviour, OnScheduledTickArgs};
 use pumpkin_core::server::Server;
 use pumpkin_core::world::World;
+use pumpkin_core::world::scoreboard::Scoreboard;
 use pumpkin_data::block_properties::{
     Facing, HorizontalFacing, RepeaterLikeProperties, StickyPistonLikeProperties,
 };
@@ -79,6 +80,7 @@ impl PumpkinProbe {
             level_info,
             dimension,
             default_registry(),
+            Arc::new(Mutex::new(Scoreboard::default())),
             Weak::<Server>::new(),
         ));
         (world, level)
