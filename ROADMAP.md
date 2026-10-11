@@ -48,7 +48,7 @@ A core task never depends on an enhanced task. An enhanced task may depend on a 
 
 A vanilla 26.3 client joins a world that the vanilla server saved, plays a normal survival session, and finds the world still there after a restart. New chunks at the edge may still differ from vanilla. They must generate and save.
 
-48 tasks, all on `core-functionality`. Lanes and dependencies: [docs/tasks/README.md](docs/tasks/README.md).
+52 tasks, all on `core-functionality`. Lanes and dependencies: [docs/tasks/README.md](docs/tasks/README.md).
 
 ### A1. The world opens
 
@@ -58,9 +58,9 @@ Harness: a unit test around the version check with synthetic NBT. The vanilla ja
 
 ### A2. The save comes back
 
-Exit: day time, weather, world border, gamerules, scoreboard objectives, and the player's health, inventory, spawn, and gamemode survive a stop and start. `LevelTime::load_from` is actually called.
+Exit: day time, weather, world border, gamerules, scoreboard objectives, and the player's health, inventory, spawn, and gamemode survive a stop and start. `LevelTime::load_from` is actually called. `game_rules.dat` stores `DataVersion` on the root beside `data`, so vanilla 26.3 can parse `minecraft:game_rules`. Scoreboard and team display names are text components. `objectives setdisplay` and `objectives list` parse. `team join` accepts a score holder who is not online.
 
-Harness: console `time set`, stop, start, `time query`. A player NBT round-trip covers the inventory. [A-05](docs/tasks/A-05.md), [A-06](docs/tasks/A-06.md).
+Harness: console `time set`, stop, start, `time query`. A player NBT round-trip covers the inventory. A unit test of `game_rules.dat` checks `DataVersion` on the root. Dispatcher tests cover the display name, `setdisplay`, `list`, and an offline `team join`. [A-05](docs/tasks/A-05.md), [A-06](docs/tasks/A-06.md), [A-49](docs/tasks/A-49.md) through [A-52](docs/tasks/A-52.md).
 
 ### A3. Configuration matches 26.3
 
@@ -198,8 +198,8 @@ Harness: harness place, dig, rollback, and a unit test of the recording folder. 
 
 | Phase | Tasks | core-functionality | enhanced-functionality |
 | --- | --- | --- | --- |
-| A | 48 | 48 | 0 |
+| A | 52 | 52 | 0 |
 | B | 30 | 18 | 12 |
 | C | 10 | 0 | 10 |
 | D | 13 | 0 | 13 |
-| Total | 101 | 66 | 35 |
+| Total | 105 | 70 | 35 |

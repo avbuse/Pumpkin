@@ -173,6 +173,7 @@ pub mod end_podium;
 pub mod entity_tracker;
 pub mod environment;
 pub mod natural_spawner;
+pub(crate) mod saved_level;
 pub mod scoreboard;
 pub mod weather;
 
@@ -259,8 +260,8 @@ pub struct World {
     /// A map of active entities within the world, keyed by their unique UUID.
     /// This does not include players.
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
-    /// The world's scoreboard, used for tracking scores, objectives, and display information.
-    pub scoreboard: std::sync::Mutex<Scoreboard>,
+    /// The server-wide scoreboard. Every dimension holds the same board.
+    pub scoreboard: Arc<std::sync::Mutex<Scoreboard>>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
     pub worldborder: std::sync::Mutex<Worldborder>,
     /// The world's time, including counting ticks for weather, time cycles, and statistics.
@@ -369,6 +370,7 @@ impl World {
         level_info: Arc<ArcSwap<LevelData>>,
         dimension: Dimension,
         block_registry: Arc<BlockRegistry>,
+        scoreboard: Arc<std::sync::Mutex<Scoreboard>>,
         server: Weak<Server>,
     ) -> Self {
         // TODO
@@ -378,6 +380,18 @@ impl World {
         let portal_poi = portal::PortalPoiStorage::new(level.level_folder.poi_folder.clone());
         let dragon_fight = (dimension.minecraft_name == Dimension::THE_END.minecraft_name)
             .then(|| std::sync::Mutex::new(dragon_fight::DragonFight::new()));
+
+        // Gamerules already live on `level_info`. Time, weather, and the border
+        // are separate objects. The scoreboard is shared by every dimension.
+        // A missing section keeps the defaults this function used to construct.
+        let restored = {
+            let info = level_info.load();
+            saved_level::load_level_state(
+                &level.level_folder.root_folder,
+                dimension.minecraft_name,
+                &info,
+            )
+        };
 
         let custom_data_path = level
             .level_folder
@@ -401,18 +415,11 @@ impl World {
             level_info,
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
-            scoreboard: std::sync::Mutex::new(Scoreboard::default()),
-            worldborder: std::sync::Mutex::new(Worldborder::new(
-                0.0,
-                0.0,
-                5.999_996_8E7,
-                0,
-                5,
-                300,
-            )),
-            level_time: std::sync::Mutex::new(LevelTime::new()),
+            scoreboard,
+            worldborder: std::sync::Mutex::new(restored.border),
+            level_time: std::sync::Mutex::new(restored.time),
             dimension,
-            weather: std::sync::Mutex::new(Weather::new()),
+            weather: std::sync::Mutex::new(restored.weather),
             block_registry,
             sea_level: generation_settings.sea_level,
             min_y: i32::from(generation_settings.shape.min_y),
@@ -581,6 +588,8 @@ impl World {
     }
 
     pub async fn shutdown(&self) {
+        // Level files are written by `Server::save_world_info` while these
+        // worlds are still loaded. This method only saves entities.
         let entities = self.entities.load_full();
         self.save_entities_by_chunk(&entities, self.level.live_entity_chunk_positions())
             .await;
@@ -1693,6 +1702,8 @@ impl World {
                 block_entity_elapsed,
             );
         }
+
+        server.record_world_tick_phases(chunk_elapsed, entity_elapsed, block_entity_elapsed);
     }
 
     pub fn register_block_change(&self, position: BlockPos, block_state_id: BlockStateId) {
@@ -1873,6 +1884,11 @@ impl World {
     }
 
     pub fn tick_environment(self: &Arc<Self>) {
+        self.worldborder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tick();
+
         let (is_night, time_of_day) = {
             let mut level_time = self
                 .level_time

@@ -14,6 +14,7 @@ use crate::plugin::server::server_broadcast::ServerBroadcastEvent;
 use crate::server::tick_rate_manager::ServerTickRateManager;
 use crate::world::WorldPortal;
 use crate::world::custom_bossbar::CustomBossbars;
+use crate::world::scoreboard::Scoreboard;
 use crate::{
     command::node::dispatcher::CommandDispatcher, entity::player::Player, world::World,
     world::map::MapManager,
@@ -38,7 +39,11 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_world::world_info::anvil::{
     AnvilLevelInfo, LEVEL_DAT_BACKUP_FILE_NAME, LEVEL_DAT_FILE_NAME,
 };
-use pumpkin_world::world_info::{LevelData, WorldInfoError, WorldInfoReader, WorldInfoWriter};
+use pumpkin_world::world_info::data_files::SavedLevelSnapshot;
+use pumpkin_world::world_info::{
+    LevelData, MAXIMUM_SUPPORTED_LEVEL_VERSION, MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
+    WorldInfoError, WorldInfoReader, WorldInfoWriter, WorldVersion,
+};
 use rand::seq::IndexedRandom;
 use rayon::prelude::*;
 use rsa::RsaPublicKey;
@@ -46,7 +51,11 @@ use std::fs;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32};
-use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use std::{
+    future::Future,
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
@@ -60,6 +69,7 @@ pub mod scheduler;
 pub mod seasonal_events;
 pub mod server_test_manager;
 pub mod tick_rate_manager;
+pub mod tick_timings;
 pub mod ticker;
 
 pub use recipe::RecipeManager;
@@ -122,6 +132,8 @@ pub struct Server {
         std::sync::Mutex<std::collections::HashMap<String, pumpkin_nbt::compound::NbtCompound>>,
     /// Global server stopwatches
     pub stopwatches: std::sync::Mutex<crate::world::stopwatches::Stopwatches>,
+    /// One scoreboard for every dimension. Vanilla keeps a single saved board.
+    pub scoreboard: Arc<std::sync::Mutex<Scoreboard>>,
     /// Global server random sequences
     pub random_sequences: std::sync::Mutex<crate::world::random_sequences::RandomSequences>,
     // Manages player advancement
@@ -130,10 +142,12 @@ pub struct Server {
     pub white_list: AtomicBool,
     /// Manages the server's tick rate, freezing, and sprinting
     pub tick_rate_manager: Arc<ServerTickRateManager>,
-    /// Stores the duration of the last 100 ticks for performance analysis
-    pub tick_times_nanos: std::sync::Mutex<[i64; 100]>,
+    /// Stores the duration of the last [`tick_timings::TICK_SAMPLE_WINDOW`] ticks.
+    pub tick_times_nanos: std::sync::Mutex<[i64; tick_timings::TICK_SAMPLE_WINDOW]>,
     /// Aggregated tick times for efficient rolling average calculation
     pub aggregated_tick_times_nanos: AtomicI64,
+    /// Phase durations for the same window as `tick_times_nanos`. Allocated once.
+    pub(crate) tick_timings: tick_timings::TickTimings,
     /// Total number of ticks processed by the server
     pub tick_count: AtomicI32,
     /// Owns the server-wide tick profiling session used by `/debug`.
@@ -201,7 +215,7 @@ impl Server {
                 );
                 let default_data =
                     LevelData::from_world_generator(basic_config.seed, &overworld_gen);
-                AnvilLevelInfo.write_world_info(&default_data, &world_path)?;
+                AnvilLevelInfo.write_world_info(&default_data, None, &world_path)?;
                 default_data
             }
             Err(
@@ -303,14 +317,18 @@ impl Server {
             player_data_storage,
             command_storage: std::sync::Mutex::new(std::collections::HashMap::new()),
             stopwatches: std::sync::Mutex::new(crate::world::stopwatches::Stopwatches::new()),
+            scoreboard: Arc::new(std::sync::Mutex::new(
+                crate::world::saved_level::load_scoreboard(&world_path),
+            )),
             random_sequences: std::sync::Mutex::new(
                 crate::world::random_sequences::RandomSequences::new(),
             ),
             advancement_manager,
             white_list,
             tick_rate_manager,
-            tick_times_nanos: std::sync::Mutex::new([0; 100]),
+            tick_times_nanos: std::sync::Mutex::new([0; tick_timings::TICK_SAMPLE_WINDOW]),
             aggregated_tick_times_nanos: AtomicI64::new(0),
+            tick_timings: tick_timings::TickTimings::new(),
             tick_count: AtomicI32::new(0),
             debug_profiler: debug_profiler::DebugProfiler::new(),
             tasks: TaskTracker::new(),
@@ -399,6 +417,7 @@ impl Server {
                 server.level_info.clone(),
                 dim.clone(),
                 block_registry.clone(),
+                server.scoreboard.clone(),
                 Arc::downgrade(&server),
             ));
             let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
@@ -483,7 +502,14 @@ impl Server {
 
         let level =
             pumpkin_world::dimension::into_level(dimension.clone(), &config, world_path, seed);
-        let world: World = World::load(level.clone(), l_info, dimension, registry, weak);
+        let world: World = World::load(
+            level.clone(),
+            l_info,
+            dimension,
+            registry,
+            self.scoreboard.clone(),
+            weak,
+        );
         let world = Arc::new(world);
         let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
         level.world_portal.store(Arc::new(Some(portal)));
@@ -520,6 +546,9 @@ impl Server {
         }
 
         world_to_unload.shutdown().await;
+        if let Err(err) = self.save_world_info_async().await {
+            error!("Failed to save world info: {err}");
+        }
         world_to_unload.unload().await;
 
         self.worlds.rcu(|w_list| {
@@ -531,10 +560,69 @@ impl Server {
         Ok(())
     }
 
+    fn prepare_level_save(&self) -> (LevelData, Option<SavedLevelSnapshot>) {
+        let scoreboard = self
+            .scoreboard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = crate::world::saved_level::snapshot_saved_level(
+            self.worlds.load().as_slice(),
+            &scoreboard,
+        );
+        drop(scoreboard);
+        if let Some(snapshot) = snapshot.as_ref() {
+            self.level_info.rcu(|current| {
+                let mut updated = (**current).clone();
+                updated.data_version = MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
+                updated.level_version = MAXIMUM_SUPPORTED_LEVEL_VERSION;
+                updated.world_version = WorldVersion::default();
+                if let Some((_, clock)) = snapshot
+                    .clocks
+                    .iter()
+                    .find(|(id, _)| id == Dimension::OVERWORLD.minecraft_name)
+                {
+                    updated.day_time = clock.total_ticks;
+                }
+                updated.clear_weather_time = snapshot.weather.clear_weather_time;
+                if let Some(border) = snapshot
+                    .borders
+                    .iter()
+                    .find(|border| border.dimension == Dimension::OVERWORLD.minecraft_name)
+                {
+                    updated.border_center_x = border.center_x;
+                    updated.border_center_z = border.center_z;
+                    updated.border_size = border.size;
+                    updated.border_size_lerp_target = border.lerp_target;
+                    updated.border_size_lerp_time = border.lerp_time;
+                    updated.border_damage_per_block = border.damage_per_block;
+                    updated.border_safe_zone = border.safe_zone;
+                    updated.border_warning_blocks = f64::from(border.warning_blocks);
+                    updated.border_warning_time = f64::from(border.warning_time);
+                }
+                Arc::new(updated)
+            });
+        }
+        ((**self.level_info.load()).clone(), snapshot)
+    }
+
     pub fn save_world_info(&self) -> Result<(), WorldInfoError> {
-        let level_data = self.level_info.load();
-        self.world_info_writer
-            .write_world_info(&level_data, &self.basic_config.get_world_path())
+        let (level_data, snapshot) = self.prepare_level_save();
+        let writer = Arc::clone(&self.world_info_writer);
+        let path = self.basic_config.get_world_path();
+        tokio::task::block_in_place(|| {
+            writer.write_world_info(&level_data, snapshot.as_ref(), &path)
+        })
+    }
+
+    pub async fn save_world_info_async(&self) -> Result<(), WorldInfoError> {
+        let (level_data, snapshot) = self.prepare_level_save();
+        let writer = Arc::clone(&self.world_info_writer);
+        let path = self.basic_config.get_world_path();
+        tokio::task::spawn_blocking(move || {
+            writer.write_world_info(&level_data, snapshot.as_ref(), &path)
+        })
+        .await
+        .unwrap_or_else(|error| Err(WorldInfoError::SerializationError(error.to_string())))
     }
 
     pub fn reload_datapacks(&self, server: &Arc<Self>) {
@@ -585,7 +673,7 @@ impl Server {
     pub async fn save_all(&self) -> Result<(), String> {
         self.management_hub.broadcast_server_saving();
 
-        if let Err(err) = self.save_world_info() {
+        if let Err(err) = self.save_world_info_async().await {
             error!("Failed to save world info: {err}");
             return Err(format!("Failed to save world info: {err}"));
         }
@@ -772,13 +860,7 @@ impl Server {
         for world in self.worlds.load().iter() {
             world.shutdown().await;
         }
-        let level_data = self.level_info.load();
-        // then lets save the world info
-
-        if let Err(err) = self
-            .world_info_writer
-            .write_world_info(&level_data, &self.basic_config.get_world_path())
-        {
+        if let Err(err) = self.save_world_info_async().await {
             error!("Failed to save level.dat: {err}");
         }
         info!("Completed worlds");
@@ -1150,7 +1232,15 @@ impl Server {
             self.tick_players_and_network();
         }
         self.flush_pending_block_updates();
+        // No Java player means there is nothing to flush, so the phase stays zero.
+        let flush_phase = (!suspended.is_empty()).then(Instant::now);
         Self::resume_player_flushes(&suspended);
+        if let Some(flush_phase) = flush_phase {
+            self.tick_timings.add_phase(
+                tick_timings::TickPhase::NetworkFlush,
+                tick_timings::duration_to_nanos(flush_phase.elapsed()),
+            );
+        }
     }
 
     fn flush_pending_block_updates(&self) {
@@ -1187,7 +1277,12 @@ impl Server {
             .datapack_manager
             .execute_function(self, &source, "#minecraft:tick");
 
+        let plugin_phase = Instant::now();
         self.plugin_manager.tick_loaders(self);
+        self.tick_timings.add_phase(
+            tick_timings::TickPhase::Plugins,
+            tick_timings::duration_to_nanos(plugin_phase.elapsed()),
+        );
         self.scheduled_functions.tick(
             self,
             self.tick_count.load(std::sync::atomic::Ordering::Relaxed) as u64,
@@ -1222,7 +1317,7 @@ impl Server {
     /// Updates the tick time statistics with the duration of the last tick.
     pub fn update_tick_times(&self, tick_duration_nanos: i64) {
         let tick_count = self.tick_count.fetch_add(1, Ordering::Relaxed);
-        let index = (tick_count % 100) as usize;
+        let index = (tick_count % tick_timings::TICK_SAMPLE_WINDOW as i32) as usize;
 
         let mut tick_times = self
             .tick_times_nanos
@@ -1231,6 +1326,8 @@ impl Server {
         let old_time = tick_times[index];
         tick_times[index] = tick_duration_nanos;
         drop(tick_times);
+
+        self.tick_timings.finish_tick(index);
 
         self.aggregated_tick_times_nanos
             .fetch_add(tick_duration_nanos - old_time, Ordering::Relaxed);
@@ -1261,10 +1358,10 @@ impl Server {
         }
     }
 
-    /// Gets the rolling average tick time over the last 100 ticks, in nanoseconds.
+    /// Gets the rolling average tick time over the fixed sample window, in nanoseconds.
     pub fn get_average_tick_time_nanos(&self) -> i64 {
         let tick_count = self.tick_count.load(Ordering::Relaxed);
-        let sample_size = (tick_count as usize).min(100);
+        let sample_size = (tick_count as usize).min(tick_timings::TICK_SAMPLE_WINDOW);
         if sample_size == 0 {
             return 0;
         }
@@ -1287,8 +1384,51 @@ impl Server {
         1000.0 / mspt
     }
 
-    /// Returns a copy of the last 100 tick times.
-    pub fn get_tick_times_nanos_copy(&self) -> [i64; 100] {
+    /// p50, p95, and p99 of the fixed tick-duration window, in nanoseconds.
+    #[must_use]
+    pub fn mspt_percentiles(&self) -> tick_timings::MsptPercentiles {
+        let times = self.get_tick_times_nanos_copy();
+        let completed = self.tick_count.load(Ordering::Relaxed).max(0) as usize;
+        let samples = completed.min(tick_timings::TICK_SAMPLE_WINDOW);
+        tick_timings::mspt_percentiles_from_samples(&times[..samples])
+    }
+
+    /// Phase durations for the last completed tick. A phase that did not run is zero.
+    #[must_use]
+    pub fn latest_tick_phases(&self) -> tick_timings::PhaseDurations {
+        let Some(index) = tick_timings::phase_ring_index(self.tick_count.load(Ordering::Relaxed))
+        else {
+            return tick_timings::PhaseDurations::default();
+        };
+        self.tick_timings.phase_at(index)
+    }
+
+    /// Records the world-tick phases `World::tick` already measured.
+    ///
+    /// Dimensions tick in parallel, so each phase keeps the slowest dimension.
+    /// Lighting is not a tick step and stays zero.
+    pub(crate) fn record_world_tick_phases(
+        &self,
+        chunks: Duration,
+        entities: Duration,
+        block_entities: Duration,
+    ) {
+        self.tick_timings.record_max_phase(
+            tick_timings::TickPhase::Chunks,
+            tick_timings::duration_to_nanos(chunks),
+        );
+        self.tick_timings.record_max_phase(
+            tick_timings::TickPhase::Entities,
+            tick_timings::duration_to_nanos(entities),
+        );
+        self.tick_timings.record_max_phase(
+            tick_timings::TickPhase::BlockEntities,
+            tick_timings::duration_to_nanos(block_entities),
+        );
+    }
+
+    /// Returns a copy of the tick durations in the fixed sample window.
+    pub fn get_tick_times_nanos_copy(&self) -> [i64; tick_timings::TICK_SAMPLE_WINDOW] {
         *self
             .tick_times_nanos
             .lock()

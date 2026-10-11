@@ -1,6 +1,6 @@
 # Task index
 
-Work breakdown for `ROADMAP.md`. One file per task. Counts: **48** in phase A, **30** in phase B, **10** in phase C, **13** in phase D, **101** total. **66** target `core-functionality` and **35** target `enhanced-functionality`. The rule is in `ROADMAP.md`. Branch mechanics are in `docs/BRANCHING.md`.
+Work breakdown for `ROADMAP.md`. One file per task. Counts: **52** in phase A, **30** in phase B, **10** in phase C, **13** in phase D, **105** total. **70** target `core-functionality` and **35** target `enhanced-functionality`. The rule is in `ROADMAP.md`. Branch mechanics are in `docs/BRANCHING.md`.
 
 ## How to pick up a task
 
@@ -29,6 +29,9 @@ Only one task edits these at a time.
 | `crates/pumpkin-core/src/entity/player.rs` attack path | `A-24`, then `A-26` and `A-27`. |
 | `crates/pumpkin-core/src/command/commands/mod.rs` | Phase C tasks each add one register line. Rebase that line. The new command file is otherwise independent. |
 | `crates/pumpkin-core/src/block/blocks/redstone/redstone_wire.rs` | `A-37`, then `B-21`. |
+| `crates/pumpkin-world/src/world_info/data_files.rs` | `A-05` (world clocks `DataVersion`), then `A-49` (game rules `DataVersion`). |
+| `crates/pumpkin-core/src/command/commands/scoreboard.rs` | `A-50`, then `A-51`. |
+| `crates/pumpkin-core/src/command/commands/team.rs` | `A-50`, then `A-52`. |
 
 ## First wave
 
@@ -47,13 +50,13 @@ These ten have no unfinished dependency and do not share a hot file. Hand them o
 | [B-01](B-01.md) | `core-functionality` | MSPT percentiles, so later perf work has a number. |
 | [A-13](A-13.md) | `core-functionality` | Strip, path, and till. |
 
-Do not add `B-03` to this wave. It edits `world/mod.rs` beside `A-05`. Do not add `A-07` or `A-48` beside `A-04`. Do not add `A-15` beside `A-24` if both would edit `living.rs`.
+Do not add `B-03` to this wave. It edits `world/mod.rs` beside `A-05`. Do not add `A-49` beside `A-05`. Both edit `world_info/data_files.rs`. Do not add `A-07` or `A-48` beside `A-04`. Do not add `A-15` beside `A-24` if both would edit `living.rs`. Do not add `A-51` beside `A-50`, or `A-52` beside `A-50`.
 
 ## Second wave
 
 Start these once the first wave is actually running on disjoint files. They also have no hard dependency, or they only need a first-wave task that is not their file neighbour.
 
-[A-06](A-06.md), [A-11](A-11.md), [A-14](A-14.md), [A-16](A-16.md), [A-17](A-17.md), [A-19](A-19.md), [A-20](A-20.md), [A-22](A-22.md), [A-23](A-23.md), [A-30](A-30.md), [A-31](A-31.md), [A-33](A-33.md), [A-34](A-34.md), [A-35](A-35.md), [A-42](A-42.md), [A-45](A-45.md), [B-07](B-07.md), [B-08](B-08.md), [B-12](B-12.md), [B-15](B-15.md), [B-16](B-16.md), [B-24](B-24.md), [B-25](B-25.md), [B-26](B-26.md), [C-01](C-01.md), [D-01](D-01.md), [D-05](D-05.md), [D-09](D-09.md)
+[A-06](A-06.md), [A-11](A-11.md), [A-14](A-14.md), [A-16](A-16.md), [A-17](A-17.md), [A-19](A-19.md), [A-20](A-20.md), [A-22](A-22.md), [A-23](A-23.md), [A-30](A-30.md), [A-31](A-31.md), [A-33](A-33.md), [A-34](A-34.md), [A-35](A-35.md), [A-42](A-42.md), [A-45](A-45.md), [A-50](A-50.md), [B-07](B-07.md), [B-08](B-08.md), [B-12](B-12.md), [B-15](B-15.md), [B-16](B-16.md), [B-24](B-24.md), [B-25](B-25.md), [B-26](B-26.md), [C-01](C-01.md), [D-01](D-01.md), [D-05](D-05.md), [D-09](D-09.md)
 
 `C-01` is the pattern for `C-02` through `C-09`: they can run together if each person rebases the register line. `C-10` waits on `A-27`. In this list, `B-16`, `B-25`, `C-01`, `D-01`, `D-05`, and `D-09` are cut from `enhanced-functionality`. The other ids are cut from `core-functionality`.
 
@@ -65,7 +68,8 @@ Tasks on `enhanced-functionality` that depend on a core task start after that co
 
 - **A-harness:** `A-01` then `A-02` and `A-03`.
 - **A-world:** `A-04` and `A-08` first. `A-48` after both. `A-07` after `A-04` leaves `anvil.rs`.
-- **A-persist:** `A-05` and `A-06` in parallel. `A-27` after `A-06` and `A-16`.
+- **A-persist:** `A-05` and `A-06` in parallel. `A-49` after `A-05` leaves `data_files.rs`. `A-27` after `A-06` and `A-16`.
+- **A-commands:** `A-50` first. `A-51` and `A-52` after `A-50`, and those two can run together.
 - **A-protocol:** `A-09` then `A-12`. `A-10` and `A-11` beside `A-09`.
 - **A-items:** `A-13`, `A-14`, `A-15`, `A-16`, `A-17`, `A-18`, `A-19`, `A-20`, `A-22`, `A-23` in parallel. `A-21` after `A-20`.
 - **A-combat:** `A-24` then `A-25`, `A-26`, `A-28`. `A-29` after `A-25`. `A-27` after `A-06` and `A-16`.
@@ -148,6 +152,10 @@ Tasks on `enhanced-functionality` that depend on a core task start after that co
 | [A-46](A-46.md) | Replace one NoOp configured-feature family | M | High | A-45 | A-gen | `core-functionality` |
 | [A-47](A-47.md) | Generate the chunk beside an imported world | M | High | A-04, A-45 | A-gen | `core-functionality` |
 | [A-48](A-48.md) | Apply the 5023 chunk field changes | M | High | A-04, A-08 | A-world | `core-functionality` |
+| [A-49](A-49.md) | Write game_rules.dat DataVersion on the root | S | Low | A-05 | A-persist | `core-functionality` |
+| [A-50](A-50.md) | Parse scoreboard and team display names as components | S | Low | none | A-commands | `core-functionality` |
+| [A-51](A-51.md) | Add scoreboard objectives list and setdisplay | M | Low | A-50 | A-commands | `core-functionality` |
+| [A-52](A-52.md) | Accept offline names in team join | S | Low | A-50 | A-commands | `core-functionality` |
 
 ## Phase B
 

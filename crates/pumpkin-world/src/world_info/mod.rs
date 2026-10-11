@@ -23,8 +23,14 @@ pub trait WorldInfoReader {
 }
 
 pub trait WorldInfoWriter: Sync + Send {
-    fn write_world_info(&self, info: &LevelData, level_folder: &Path)
-    -> Result<(), WorldInfoError>;
+    /// `saved` is this write's clock, weather, border, and scoreboard snapshot.
+    /// `None` keeps the previous fallback for those files.
+    fn write_world_info(
+        &self,
+        info: &LevelData,
+        saved: Option<&data_files::SavedLevelSnapshot>,
+        level_folder: &Path,
+    ) -> Result<(), WorldInfoError>;
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

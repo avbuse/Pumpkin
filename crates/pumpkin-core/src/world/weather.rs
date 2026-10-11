@@ -52,6 +52,34 @@ impl Weather {
         }
     }
 
+    /// Weather restored from `weather.dat` (or the older `level.dat` keys).
+    ///
+    /// Rain and thunder levels are not stored. A flag that is set comes back
+    /// fully on, which is what a joining client is told.
+    #[must_use]
+    pub const fn from_saved(
+        clear_weather_time: i32,
+        rain_time: i32,
+        thunder_time: i32,
+        raining: bool,
+        thundering: bool,
+    ) -> Self {
+        let rain_level = if raining { 1.0 } else { 0.0 };
+        let thunder_level = if thundering { 1.0 } else { 0.0 };
+        Self {
+            clear_weather_time,
+            raining,
+            rain_time,
+            thundering,
+            thunder_time,
+            rain_level,
+            old_rain_level: rain_level,
+            thunder_level,
+            old_thunder_level: thunder_level,
+            weather_cycle_enabled: true,
+        }
+    }
+
     pub fn set_weather_parameters(
         &mut self,
         world: &World,
