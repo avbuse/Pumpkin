@@ -1386,9 +1386,9 @@ impl Scoreboard {
         board
     }
 
-    /// Writes `scoreboard.dat`. Empty lists are left out, matching an empty save.
+    /// The `data` compound of `scoreboard.dat`. The file wrapper adds `DataVersion`.
     #[must_use]
-    pub fn to_nbt(&self, data_version: i32) -> NbtCompound {
+    pub fn saved_data(&self) -> NbtCompound {
         let mut data = NbtCompound::new();
         if !self.objectives.is_empty() {
             let objectives = self
@@ -1426,33 +1426,39 @@ impl Scoreboard {
             }
             data.put_compound("DisplaySlots", slots);
         }
+        data
+    }
 
+    /// Writes `scoreboard.dat`. Empty lists are left out, matching an empty save.
+    #[must_use]
+    pub fn to_nbt(&self, data_version: i32) -> NbtCompound {
         let mut root = NbtCompound::new();
         root.put_int("DataVersion", data_version);
-        root.put_compound("data", data);
+        root.put_compound("data", self.saved_data());
         root
     }
 }
 
 fn text_from_saved(compound: &NbtCompound, key: &str, fallback: &str) -> TextComponent {
-    match compound.get(key) {
-        Some(NbtTag::String(raw)) => {
-            serde_json::from_str(raw).unwrap_or_else(|_| TextComponent::text(raw.to_string()))
-        }
-        Some(other) => TextComponent::from_nbt(other),
-        None => TextComponent::text(fallback.to_string()),
-    }
+    // A string tag is literal text. Since 1.21.5 that is how vanilla reads it.
+    compound.get(key).map_or_else(
+        || TextComponent::text(fallback.to_string()),
+        TextComponent::from_nbt,
+    )
 }
 
-fn text_to_saved(component: &TextComponent) -> String {
-    component.to_json_for_version(&JavaMinecraftVersion::V_26_3)
+fn put_saved_text(compound: &mut NbtCompound, key: &str, component: &TextComponent) {
+    compound.put(
+        key,
+        component.to_nbt_tag_for_version(&JavaMinecraftVersion::V_26_3),
+    );
 }
 
 fn objective_to_nbt(objective: &ScoreboardObjective) -> NbtCompound {
     let mut compound = NbtCompound::new();
     compound.put_string("Name", objective.name.clone());
     compound.put_string("CriteriaName", objective.criterion.clone());
-    compound.put_string("DisplayName", text_to_saved(&objective.display_name));
+    put_saved_text(&mut compound, "DisplayName", &objective.display_name);
     let render_type = match objective.render_type {
         RenderType::Hearts => "hearts",
         RenderType::Integer => "integer",
@@ -1468,7 +1474,7 @@ fn score_to_nbt(score: &ScoreboardScore) -> NbtCompound {
     compound.put_int("Score", score.value.0);
     compound.put_bool("Locked", score.locked);
     if let Some(display_name) = &score.display_name {
-        compound.put_string("display", text_to_saved(display_name));
+        put_saved_text(&mut compound, "display", display_name);
     }
     compound
 }
@@ -1510,7 +1516,7 @@ fn team_from_nbt(compound: &NbtCompound, name: &str) -> Team {
 fn team_to_nbt(team: &Team) -> NbtCompound {
     let mut compound = NbtCompound::new();
     compound.put_string("Name", team.name.clone());
-    compound.put_string("DisplayName", text_to_saved(&team.display_name));
+    put_saved_text(&mut compound, "DisplayName", &team.display_name);
     compound.put_bool("AllowFriendlyFire", (team.options & FRIENDLY_FIRE_BIT) != 0);
     compound.put_bool(
         "SeeFriendlyInvisibles",
@@ -1522,8 +1528,8 @@ fn team_to_nbt(team: &Team) -> NbtCompound {
     );
     compound.put_string("CollisionRule", team.collision_rule.to_str().to_string());
     compound.put_string("TeamColor", team.color.name().to_string());
-    compound.put_string("MemberNamePrefix", text_to_saved(&team.player_prefix));
-    compound.put_string("MemberNameSuffix", text_to_saved(&team.player_suffix));
+    put_saved_text(&mut compound, "MemberNamePrefix", &team.player_prefix);
+    put_saved_text(&mut compound, "MemberNameSuffix", &team.player_suffix);
     if !team.players.is_empty() {
         let players = team
             .players

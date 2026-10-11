@@ -21,8 +21,8 @@ use crate::world_info::{
         minecraft_data_dir, read_game_rules, read_wandering_trader, read_weather,
         read_world_clocks, read_world_gen_settings, write_custom_boss_events_stub,
         write_game_rules, write_random_sequences_stub, write_scheduled_events_stub,
-        write_scoreboard_stub, write_stopwatches_stub, write_wandering_trader, write_weather,
-        write_world_clocks, write_world_gen_settings,
+        write_scoreboard, write_scoreboard_stub, write_stopwatches_stub, write_wandering_trader,
+        write_weather, write_world_border, write_world_clocks, write_world_gen_settings,
     },
     default_data_packs,
 };
@@ -420,6 +420,37 @@ impl WorldInfoReader for AnvilLevelInfo {
     }
 }
 
+fn write_saved_level(
+    level_folder: &Path,
+    saved: &crate::world_info::data_files::SavedLevelSnapshot,
+    data_version: i32,
+) {
+    let mut clocks = read_world_clocks(level_folder);
+    clocks.data_version = data_version;
+    for (id, clock) in &saved.clocks {
+        clocks.clocks.insert(id.clone(), clock.clone());
+    }
+    if let Err(error) = write_world_clocks(level_folder, &clocks) {
+        error!("Failed to write world_clocks.dat: {error}");
+    }
+
+    let mut weather = saved.weather.clone();
+    weather.data_version = data_version;
+    if let Err(error) = write_weather(level_folder, &weather) {
+        error!("Failed to write weather.dat: {error}");
+    }
+
+    if let Err(error) = write_scoreboard(level_folder, &saved.scoreboard, data_version) {
+        error!("Failed to write scoreboard.dat: {error}");
+    }
+
+    for border in &saved.borders {
+        if let Err(error) = write_world_border(level_folder, border, data_version) {
+            error!("Failed to write world_border.dat: {error}");
+        }
+    }
+}
+
 impl WorldInfoWriter for AnvilLevelInfo {
     fn write_world_info(
         &self,
@@ -445,6 +476,9 @@ impl WorldInfoWriter for AnvilLevelInfo {
             .cloned()
             .unwrap_or_default();
         level_data_to_nbt(&level_data, &mut data_comp);
+        if let Some(saved) = &level_data.saved_level {
+            data_comp.put_long("Time", saved.world_age);
+        }
         root.put_compound(LEVEL_DATA_TAG, data_comp);
 
         write_gzip_compound_tag(root, File::create(&path_new)?)
@@ -471,27 +505,31 @@ impl WorldInfoWriter for AnvilLevelInfo {
             error!("Failed to write world_gen_settings.dat: {e}");
         }
 
-        // world_clocks.dat – persist the overworld day_time; preserve other
-        let mut clocks = read_world_clocks(level_folder);
-        clocks.data_version = data_version;
-        clocks
-            .clocks
-            .entry("minecraft:overworld".to_string())
-            .and_modify(|c| c.total_ticks = info.day_time)
-            .or_insert(crate::world_info::data_files::DimensionClock {
-                total_ticks: info.day_time,
-            });
+        if let Some(saved) = &info.saved_level {
+            write_saved_level(level_folder, saved, data_version);
+        } else {
+            // world_clocks.dat – persist the overworld day_time; preserve other
+            let mut clocks = read_world_clocks(level_folder);
+            clocks.data_version = data_version;
+            clocks
+                .clocks
+                .entry("minecraft:overworld".to_string())
+                .and_modify(|clock| clock.total_ticks = info.day_time)
+                .or_insert(crate::world_info::data_files::DimensionClock::ticks(
+                    info.day_time,
+                ));
 
-        if let Err(e) = write_world_clocks(level_folder, &clocks) {
-            error!("Failed to write world_clocks.dat: {e}");
-        }
+            if let Err(e) = write_world_clocks(level_folder, &clocks) {
+                error!("Failed to write world_clocks.dat: {e}");
+            }
 
-        // weather.dat
-        let mut weather = read_weather(level_folder);
-        weather.clear_weather_time = info.clear_weather_time;
-        weather.data_version = data_version;
-        if let Err(e) = write_weather(level_folder, &weather) {
-            error!("Failed to write weather.dat: {e}");
+            // weather.dat
+            let mut weather = read_weather(level_folder);
+            weather.clear_weather_time = info.clear_weather_time;
+            weather.data_version = data_version;
+            if let Err(e) = write_weather(level_folder, &weather) {
+                error!("Failed to write weather.dat: {e}");
+            }
         }
 
         // wandering_trader.dat (stub / load-save)
@@ -517,7 +555,9 @@ impl WorldInfoWriter for AnvilLevelInfo {
         }
 
         // scoreboard.dat
-        if let Err(e) = write_scoreboard_stub(level_folder, data_version) {
+        if info.saved_level.is_none()
+            && let Err(e) = write_scoreboard_stub(level_folder, data_version)
+        {
             error!("Failed to write scoreboard.dat: {e}");
         }
 
@@ -954,6 +994,7 @@ mod test {
                 series: "main".to_string(),
             },
             map_id: 0,
+            saved_level: None,
         },
     });
 

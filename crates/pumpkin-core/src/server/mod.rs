@@ -14,6 +14,7 @@ use crate::plugin::server::server_broadcast::ServerBroadcastEvent;
 use crate::server::tick_rate_manager::ServerTickRateManager;
 use crate::world::WorldPortal;
 use crate::world::custom_bossbar::CustomBossbars;
+use crate::world::scoreboard::Scoreboard;
 use crate::{
     command::node::dispatcher::CommandDispatcher, entity::player::Player, world::World,
     world::map::MapManager,
@@ -38,7 +39,10 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_world::world_info::anvil::{
     AnvilLevelInfo, LEVEL_DAT_BACKUP_FILE_NAME, LEVEL_DAT_FILE_NAME,
 };
-use pumpkin_world::world_info::{LevelData, WorldInfoError, WorldInfoReader, WorldInfoWriter};
+use pumpkin_world::world_info::{
+    LevelData, MAXIMUM_SUPPORTED_LEVEL_VERSION, MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
+    WorldInfoError, WorldInfoReader, WorldInfoWriter, WorldVersion,
+};
 use rand::seq::IndexedRandom;
 use rayon::prelude::*;
 use rsa::RsaPublicKey;
@@ -122,6 +126,8 @@ pub struct Server {
         std::sync::Mutex<std::collections::HashMap<String, pumpkin_nbt::compound::NbtCompound>>,
     /// Global server stopwatches
     pub stopwatches: std::sync::Mutex<crate::world::stopwatches::Stopwatches>,
+    /// One scoreboard for every dimension. Vanilla keeps a single saved board.
+    pub scoreboard: Arc<std::sync::Mutex<Scoreboard>>,
     /// Global server random sequences
     pub random_sequences: std::sync::Mutex<crate::world::random_sequences::RandomSequences>,
     // Manages player advancement
@@ -303,6 +309,9 @@ impl Server {
             player_data_storage,
             command_storage: std::sync::Mutex::new(std::collections::HashMap::new()),
             stopwatches: std::sync::Mutex::new(crate::world::stopwatches::Stopwatches::new()),
+            scoreboard: Arc::new(std::sync::Mutex::new(
+                crate::world::saved_level::load_scoreboard(&world_path),
+            )),
             random_sequences: std::sync::Mutex::new(
                 crate::world::random_sequences::RandomSequences::new(),
             ),
@@ -399,6 +408,7 @@ impl Server {
                 server.level_info.clone(),
                 dim.clone(),
                 block_registry.clone(),
+                server.scoreboard.clone(),
                 Arc::downgrade(&server),
             ));
             let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
@@ -483,7 +493,14 @@ impl Server {
 
         let level =
             pumpkin_world::dimension::into_level(dimension.clone(), &config, world_path, seed);
-        let world: World = World::load(level.clone(), l_info, dimension, registry, weak);
+        let world: World = World::load(
+            level.clone(),
+            l_info,
+            dimension,
+            registry,
+            self.scoreboard.clone(),
+            weak,
+        );
         let world = Arc::new(world);
         let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
         level.world_portal.store(Arc::new(Some(portal)));
@@ -520,6 +537,9 @@ impl Server {
         }
 
         world_to_unload.shutdown().await;
+        if let Err(err) = self.save_world_info_async().await {
+            error!("Failed to save world info: {err}");
+        }
         world_to_unload.unload().await;
 
         self.worlds.rcu(|w_list| {
@@ -531,10 +551,87 @@ impl Server {
         Ok(())
     }
 
+    fn prepare_level_save(&self) -> LevelData {
+        let scoreboard = self
+            .scoreboard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = crate::world::saved_level::snapshot_saved_level(
+            self.worlds.load().as_slice(),
+            &scoreboard,
+        );
+        drop(scoreboard);
+        if let Some(snapshot) = snapshot {
+            self.level_info.rcu(|current| {
+                let mut updated = (**current).clone();
+                updated.saved_level = Some(snapshot.clone());
+                updated.data_version = MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
+                updated.level_version = MAXIMUM_SUPPORTED_LEVEL_VERSION;
+                updated.world_version = WorldVersion::default();
+                if let Some((_, clock)) = snapshot
+                    .clocks
+                    .iter()
+                    .find(|(id, _)| id == Dimension::OVERWORLD.minecraft_name)
+                {
+                    updated.day_time = clock.total_ticks;
+                }
+                updated.clear_weather_time = snapshot.weather.clear_weather_time;
+                if let Some(border) = snapshot
+                    .borders
+                    .iter()
+                    .find(|border| border.dimension == Dimension::OVERWORLD.minecraft_name)
+                {
+                    updated.border_center_x = border.center_x;
+                    updated.border_center_z = border.center_z;
+                    updated.border_size = border.size;
+                    updated.border_size_lerp_target = border.lerp_target;
+                    updated.border_size_lerp_time = border.lerp_time;
+                    updated.border_damage_per_block = border.damage_per_block;
+                    updated.border_safe_zone = border.safe_zone;
+                    updated.border_warning_blocks = f64::from(border.warning_blocks);
+                    updated.border_warning_time = f64::from(border.warning_time);
+                }
+                Arc::new(updated)
+            });
+        }
+        let level_data = (**self.level_info.load()).clone();
+        // The snapshot is only for this write. Leaving it on `level_info` would
+        // make a later writer store a stale board.
+        self.level_info.rcu(|current| {
+            let mut updated = (**current).clone();
+            updated.saved_level = None;
+            Arc::new(updated)
+        });
+        level_data
+    }
+
     pub fn save_world_info(&self) -> Result<(), WorldInfoError> {
-        let level_data = self.level_info.load();
-        self.world_info_writer
-            .write_world_info(&level_data, &self.basic_config.get_world_path())
+        let level_data = self.prepare_level_save();
+        let writer = Arc::clone(&self.world_info_writer);
+        let path = self.basic_config.get_world_path();
+        let write = move || writer.write_world_info(&level_data, &path);
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    tokio::task::spawn_blocking(write)
+                        .await
+                        .unwrap_or_else(|error| {
+                            Err(WorldInfoError::SerializationError(error.to_string()))
+                        })
+                })
+            })
+        } else {
+            write()
+        }
+    }
+
+    pub async fn save_world_info_async(&self) -> Result<(), WorldInfoError> {
+        let level_data = self.prepare_level_save();
+        let writer = Arc::clone(&self.world_info_writer);
+        let path = self.basic_config.get_world_path();
+        tokio::task::spawn_blocking(move || writer.write_world_info(&level_data, &path))
+            .await
+            .unwrap_or_else(|error| Err(WorldInfoError::SerializationError(error.to_string())))
     }
 
     pub fn reload_datapacks(&self, server: &Arc<Self>) {
@@ -585,14 +682,7 @@ impl Server {
     pub async fn save_all(&self) -> Result<(), String> {
         self.management_hub.broadcast_server_saving();
 
-        // `/save-all` writes world info without shutting worlds down. Snapshot
-        // the live clock, weather, border, and scoreboard first, or the writer
-        // stores the values from startup.
-        for world in self.worlds.load().iter() {
-            world.persist_saved_level();
-        }
-
-        if let Err(err) = self.save_world_info() {
+        if let Err(err) = self.save_world_info_async().await {
             error!("Failed to save world info: {err}");
             return Err(format!("Failed to save world info: {err}"));
         }
@@ -779,13 +869,7 @@ impl Server {
         for world in self.worlds.load().iter() {
             world.shutdown().await;
         }
-        let level_data = self.level_info.load();
-        // then lets save the world info
-
-        if let Err(err) = self
-            .world_info_writer
-            .write_world_info(&level_data, &self.basic_config.get_world_path())
-        {
+        if let Err(err) = self.save_world_info_async().await {
             error!("Failed to save level.dat: {err}");
         }
         info!("Completed worlds");

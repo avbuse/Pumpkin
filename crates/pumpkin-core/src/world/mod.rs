@@ -173,7 +173,7 @@ pub mod end_podium;
 pub mod entity_tracker;
 pub mod environment;
 pub mod natural_spawner;
-mod saved_level;
+pub(crate) mod saved_level;
 pub mod scoreboard;
 pub mod weather;
 
@@ -260,8 +260,8 @@ pub struct World {
     /// A map of active entities within the world, keyed by their unique UUID.
     /// This does not include players.
     pub entities: ArcSwap<Vec<Arc<dyn EntityBase>>>,
-    /// The world's scoreboard, used for tracking scores, objectives, and display information.
-    pub scoreboard: std::sync::Mutex<Scoreboard>,
+    /// The server-wide scoreboard. Every dimension holds the same board.
+    pub scoreboard: Arc<std::sync::Mutex<Scoreboard>>,
     /// The world's worldborder, defining the playable area and controlling its expansion or contraction.
     pub worldborder: std::sync::Mutex<Worldborder>,
     /// The world's time, including counting ticks for weather, time cycles, and statistics.
@@ -370,6 +370,7 @@ impl World {
         level_info: Arc<ArcSwap<LevelData>>,
         dimension: Dimension,
         block_registry: Arc<BlockRegistry>,
+        scoreboard: Arc<std::sync::Mutex<Scoreboard>>,
         server: Weak<Server>,
     ) -> Self {
         // TODO
@@ -380,9 +381,9 @@ impl World {
         let dragon_fight = (dimension.minecraft_name == Dimension::THE_END.minecraft_name)
             .then(|| std::sync::Mutex::new(dragon_fight::DragonFight::new()));
 
-        // Gamerules already live on `level_info`. Time, weather, the border, and
-        // the scoreboard are separate objects. A missing section keeps the
-        // defaults this function used to construct.
+        // Gamerules already live on `level_info`. Time, weather, and the border
+        // are separate objects. The scoreboard is shared by every dimension.
+        // A missing section keeps the defaults this function used to construct.
         let restored = {
             let info = level_info.load();
             saved_level::load_level_state(
@@ -414,7 +415,7 @@ impl World {
             level_info,
             players: ArcSwap::new(Arc::new(Vec::new())),
             entities: ArcSwap::new(Arc::new(Vec::new())),
-            scoreboard: std::sync::Mutex::new(restored.scoreboard),
+            scoreboard,
             worldborder: std::sync::Mutex::new(restored.border),
             level_time: std::sync::Mutex::new(restored.time),
             dimension,
@@ -586,44 +587,9 @@ impl World {
         dx <= radius && dz <= radius
     }
 
-    /// Copies the live clock, weather, border, and scoreboard into the world folder.
-    pub(crate) fn persist_saved_level(&self) {
-        let time = self
-            .level_time
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let weather = self
-            .weather
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let border = self
-            .worldborder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let scoreboard = self
-            .scoreboard
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        saved_level::persist_level_state(
-            &self.level.level_folder.root_folder,
-            self.dimension.minecraft_name,
-            &time,
-            &weather,
-            &border,
-            &scoreboard,
-            &self.level_info,
-        );
-    }
-
     pub async fn shutdown(&self) {
-        // The world-info writer runs after every world has shut down, and it
-        // rewrites the clock and clear-weather timer from `level_info`.
-        self.persist_saved_level();
-
+        // Level files are written by `Server::save_world_info` while these
+        // worlds are still loaded. This method only saves entities.
         let entities = self.entities.load_full();
         self.save_entities_by_chunk(&entities, self.level.live_entity_chunk_positions())
             .await;
@@ -1916,6 +1882,11 @@ impl World {
     }
 
     pub fn tick_environment(self: &Arc<Self>) {
+        self.worldborder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tick();
+
         let (is_night, time_of_day) = {
             let mut level_time = self
                 .level_time

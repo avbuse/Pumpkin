@@ -1,33 +1,32 @@
-//! Restores and writes the clock, weather, border, and scoreboard.
+//! Restores the clock, weather, and border, and snapshots them for the writer.
 //!
-//! Gamerules stay on `LevelData`. The world-info writer rewrites the overworld
-//! clock's tick count and the clear-weather timer from that struct, so those
-//! fields are copied back before it runs.
+//! Gamerules stay on `LevelData`. The scoreboard is one server-wide board, loaded
+//! once and shared by every dimension. File writes live in the world-info writer.
 
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_nbt::compound::NbtCompound;
-use pumpkin_nbt::nbt_compress::{read_gzip_compound_tag, write_gzip_compound_tag};
+use pumpkin_nbt::nbt_compress::read_gzip_compound_tag;
 use pumpkin_world::world_info::LevelData;
-use pumpkin_world::world_info::data_files::{self, WeatherData, minecraft_data_dir};
-use tracing::warn;
+use pumpkin_world::world_info::data_files::{
+    DimensionClock, SavedBorder, SavedLevelSnapshot, WeatherData, minecraft_data_dir,
+};
 
+use super::World;
 use super::border::Worldborder;
 use super::scoreboard::Scoreboard;
 use super::time::LevelTime;
 use super::weather::Weather;
 
-/// Clock, weather, border, and scoreboard read from a world folder.
+/// Clock, weather, and border read from a world folder.
 pub(super) struct LoadedLevelState {
     pub(super) time: LevelTime,
     pub(super) weather: Weather,
     pub(super) border: Worldborder,
-    pub(super) scoreboard: Scoreboard,
 }
 
 enum ReadGzip {
@@ -53,35 +52,102 @@ pub(super) fn load_level_state(
         time: load_time(root, dimension_name, level_data, level_dat.as_ref()),
         weather: load_weather(root, dimension_name, level_dat.as_ref()),
         border: load_border(root, dimension_name, level_dat.as_ref()),
-        scoreboard: load_scoreboard(root),
     }
 }
 
-/// Writes time, weather, the border, and the scoreboard into the world folder.
+/// The one scoreboard for the server. Every dimension shares the result.
+#[must_use]
+pub fn load_scoreboard(root: &Path) -> Scoreboard {
+    let paths = [
+        minecraft_data_dir(root).join("scoreboard.dat"),
+        root.join("data").join("scoreboard.dat"),
+    ];
+    for path in &paths {
+        if let ReadGzip::Compound(file) = read_gzip(path) {
+            return Scoreboard::from_nbt(&file);
+        }
+    }
+    Scoreboard::default()
+}
+
+/// Copies the live clocks, weather, borders, and the shared scoreboard.
 ///
-/// The overworld copy is also stored on `level_info`. The world-info writer
-/// later rewrites the overworld clock and `clear_weather_time` from there.
-pub(super) fn persist_level_state(
-    root: &Path,
-    dimension_name: &str,
-    time: &LevelTime,
-    weather: &Weather,
-    border: &Worldborder,
+/// An empty world list leaves the snapshot unset, so a save during startup
+/// does not invent weather or clocks.
+#[must_use]
+pub fn snapshot_saved_level(
+    worlds: &[Arc<World>],
     scoreboard: &Scoreboard,
-    level_info: &Arc<ArcSwap<LevelData>>,
-) {
-    let version = level_info.load().data_version;
-    write_border(root, dimension_name, border, version);
-    if let Some(clock_id) = clock_id(dimension_name) {
-        write_clock(root, clock_id, time, version);
+) -> Option<SavedLevelSnapshot> {
+    if worlds.is_empty() {
+        return None;
     }
-    if !is_overworld(dimension_name) {
-        return;
+    let mut clocks = Vec::new();
+    let mut borders = Vec::new();
+    let mut weather = None;
+    let mut world_age = 0;
+    for world in worlds {
+        let time = world
+            .level_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let border = world
+            .worldborder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let name = world.dimension.minecraft_name;
+        if let Some(clock_id) = clock_id(name) {
+            clocks.push((
+                clock_id.to_string(),
+                DimensionClock {
+                    total_ticks: time.time_of_day,
+                    partial_tick: Some(time.partial_tick),
+                    rate: Some(time.rate),
+                    paused: Some(time.paused),
+                },
+            ));
+        }
+        borders.push(saved_border(name, &border));
+        if is_overworld(name) {
+            world_age = time.world_age;
+            let live = world
+                .weather
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            weather = Some(WeatherData {
+                rain_time: live.rain_time,
+                raining: live.raining,
+                thundering: live.thundering,
+                thunder_time: live.thunder_time,
+                clear_weather_time: live.clear_weather_time,
+                data_version: 0,
+            });
+        }
     }
-    write_saved_weather(root, weather, version);
-    write_scoreboard(root, scoreboard, version);
-    stamp_world_age(root, time.world_age);
-    store_overworld_level_info(level_info, time, weather, border);
+    Some(SavedLevelSnapshot {
+        world_age,
+        clocks,
+        weather: weather.unwrap_or_default(),
+        scoreboard: scoreboard.saved_data(),
+        borders,
+    })
+}
+
+fn saved_border(dimension_name: &str, border: &Worldborder) -> SavedBorder {
+    SavedBorder {
+        dimension: dimension_name.to_string(),
+        center_x: border.center_x,
+        center_z: border.center_z,
+        size: border.saved_size(),
+        lerp_target: border.new_diameter,
+        lerp_time: border.saved_lerp_time(),
+        damage_per_block: f64::from(border.damage_per_block),
+        safe_zone: f64::from(border.buffer),
+        warning_blocks: border.warning_blocks,
+        warning_time: border.warning_time,
+    }
 }
 
 fn is_overworld(dimension_name: &str) -> bool {
@@ -117,19 +183,24 @@ fn load_time(
     level_dat: Option<&NbtCompound>,
 ) -> LevelTime {
     let world_age = level_dat
-        .and_then(|data| saved_i64(data, &["Time"]))
+        .and_then(|data| data.get_long("Time"))
         .unwrap_or(0);
     let mut time = LevelTime::new();
     if let Some(clock_id) = clock_id(dimension_name)
         && let Some(clock) = read_clock(root, clock_id)
     {
-        let (total_ticks, partial_tick, rate, paused) = clock_state(&clock);
-        time.restore(total_ticks, world_age, partial_tick, rate, paused);
+        time.restore(
+            clock.get_long("total_ticks").unwrap_or(0),
+            world_age,
+            clock.get_float("partial_tick").unwrap_or(0.0),
+            clock.get_float("rate").unwrap_or(1.0),
+            clock.get_bool("paused").unwrap_or(false),
+        );
         return time;
     }
     let time_of_day = if is_overworld(dimension_name) {
         level_dat
-            .and_then(|data| saved_i64(data, &["DayTime"]))
+            .and_then(|data| data.get_long("DayTime"))
             .unwrap_or(level_data.day_time)
     } else {
         0
@@ -148,14 +219,6 @@ fn read_clock(root: &Path, clock_id: &str) -> Option<NbtCompound> {
         .cloned()
 }
 
-fn clock_state(clock: &NbtCompound) -> (i64, f32, f32, bool) {
-    let total_ticks = saved_i64(clock, &["total_ticks", "totalTicks"]).unwrap_or(0);
-    let partial_tick = saved_f32(clock, &["partial_tick", "partialTick"]).unwrap_or(0.0);
-    let rate = saved_f32(clock, &["rate"]).unwrap_or(1.0);
-    let paused = saved_bool(clock, &["paused"]).unwrap_or(false);
-    (total_ticks, partial_tick, rate, paused)
-}
-
 fn load_weather(root: &Path, dimension_name: &str, level_dat: Option<&NbtCompound>) -> Weather {
     if !is_overworld(dimension_name) {
         return Weather::new();
@@ -165,11 +228,11 @@ fn load_weather(root: &Path, dimension_name: &str, level_dat: Option<&NbtCompoun
         let owned = file.get_compound("data").cloned();
         let data = owned.as_ref().unwrap_or(&file);
         return Weather::from_saved(
-            saved_i32(data, &["clear_weather_time"]).unwrap_or(0),
-            saved_i32(data, &["rain_time"]).unwrap_or(0),
-            saved_i32(data, &["thunder_time"]).unwrap_or(0),
-            saved_bool(data, &["raining"]).unwrap_or(false),
-            saved_bool(data, &["thundering"]).unwrap_or(false),
+            data.get_int("clear_weather_time").unwrap_or(0),
+            data.get_int("rain_time").unwrap_or(0),
+            data.get_int("thunder_time").unwrap_or(0),
+            data.get_bool("raining").unwrap_or(false),
+            data.get_bool("thundering").unwrap_or(false),
         );
     }
     level_dat
@@ -182,23 +245,18 @@ fn weather_from_level_dat(data: &NbtCompound) -> Option<Weather> {
         "raining",
         "thundering",
         "rainTime",
-        "RainTime",
-        "rain_time",
         "thunderTime",
-        "ThunderTime",
-        "thunder_time",
         "clearWeatherTime",
-        "clear_weather_time",
     ];
-    if !has_any(data, KEYS) {
+    if !KEYS.iter().any(|key| data.has(key)) {
         return None;
     }
     Some(Weather::from_saved(
-        saved_i32(data, &["clearWeatherTime", "clear_weather_time"]).unwrap_or(0),
-        saved_i32(data, &["rainTime", "RainTime", "rain_time"]).unwrap_or(0),
-        saved_i32(data, &["thunderTime", "ThunderTime", "thunder_time"]).unwrap_or(0),
-        saved_bool(data, &["raining"]).unwrap_or(false),
-        saved_bool(data, &["thundering"]).unwrap_or(false),
+        data.get_int("clearWeatherTime").unwrap_or(0),
+        data.get_int("rainTime").unwrap_or(0),
+        data.get_int("thunderTime").unwrap_or(0),
+        data.get_bool("raining").unwrap_or(false),
+        data.get_bool("thundering").unwrap_or(false),
     ))
 }
 
@@ -220,193 +278,69 @@ fn load_border(root: &Path, dimension_name: &str, level_dat: Option<&NbtCompound
 
 fn border_from_settings(data: &NbtCompound) -> Worldborder {
     let fallback = Worldborder::vanilla_default();
-    let size = saved_f64(data, &["size"]).unwrap_or(fallback.new_diameter);
-    border_from_parts(
-        saved_f64(data, &["center_x"]).unwrap_or(fallback.center_x),
-        saved_f64(data, &["center_z"]).unwrap_or(fallback.center_z),
+    let size = data.get_double("size").unwrap_or(fallback.new_diameter);
+    Worldborder::from_saved(
+        data.get_double("center_x").unwrap_or(fallback.center_x),
+        data.get_double("center_z").unwrap_or(fallback.center_z),
         size,
-        saved_f64(data, &["lerp_target"]).unwrap_or(size),
-        saved_i64(data, &["lerp_time"]).unwrap_or(0),
-        saved_i32(data, &["warning_blocks"]).unwrap_or(fallback.warning_blocks),
-        saved_i32(data, &["warning_time"]).unwrap_or(fallback.warning_time),
-        saved_f32(data, &["damage_per_block"]).unwrap_or(fallback.damage_per_block),
-        saved_f32(data, &["safe_zone"]).unwrap_or(fallback.buffer),
+        data.get_double("lerp_target").unwrap_or(size),
+        data.get_long("lerp_time").unwrap_or(0),
+        data.get_int("warning_blocks")
+            .unwrap_or(fallback.warning_blocks),
+        data.get_int("warning_time")
+            .unwrap_or(fallback.warning_time),
+        double_as_f32(
+            data.get_double("damage_per_block")
+                .unwrap_or(f64::from(fallback.damage_per_block)),
+        ),
+        double_as_f32(
+            data.get_double("safe_zone")
+                .unwrap_or(f64::from(fallback.buffer)),
+        ),
     )
 }
 
 fn border_from_level_dat(data: &NbtCompound) -> Option<Worldborder> {
-    if !has_any(data, &["BorderSize", "BorderCenterX", "BorderCenterZ"]) {
+    if !["BorderSize", "BorderCenterX", "BorderCenterZ"]
+        .iter()
+        .any(|key| data.has(key))
+    {
         return None;
     }
     let fallback = Worldborder::vanilla_default();
-    let size = saved_f64(data, &["BorderSize"]).unwrap_or(fallback.new_diameter);
-    Some(border_from_parts(
-        saved_f64(data, &["BorderCenterX"]).unwrap_or(fallback.center_x),
-        saved_f64(data, &["BorderCenterZ"]).unwrap_or(fallback.center_z),
+    let size = data
+        .get_double("BorderSize")
+        .unwrap_or(fallback.new_diameter);
+    Some(Worldborder::from_saved(
+        data.get_double("BorderCenterX")
+            .unwrap_or(fallback.center_x),
+        data.get_double("BorderCenterZ")
+            .unwrap_or(fallback.center_z),
         size,
-        saved_f64(data, &["BorderSizeLerpTarget"]).unwrap_or(size),
-        saved_i64(data, &["BorderSizeLerpTime"]).unwrap_or(0),
-        saved_i32(data, &["BorderWarningBlocks"]).unwrap_or(fallback.warning_blocks),
-        saved_i32(data, &["BorderWarningTime"]).unwrap_or(fallback.warning_time),
-        saved_f32(data, &["BorderDamagePerBlock"]).unwrap_or(fallback.damage_per_block),
-        saved_f32(data, &["BorderSafeZone"]).unwrap_or(fallback.buffer),
+        data.get_double("BorderSizeLerpTarget").unwrap_or(size),
+        data.get_long("BorderSizeLerpTime").unwrap_or(0),
+        data.get_int("BorderWarningBlocks")
+            .unwrap_or(fallback.warning_blocks),
+        data.get_int("BorderWarningTime")
+            .unwrap_or(fallback.warning_time),
+        double_as_f32(
+            data.get_double("BorderDamagePerBlock")
+                .unwrap_or(f64::from(fallback.damage_per_block)),
+        ),
+        double_as_f32(
+            data.get_double("BorderSafeZone")
+                .unwrap_or(f64::from(fallback.buffer)),
+        ),
     ))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one argument per field stored in the border save"
-)]
-const fn border_from_parts(
-    center_x: f64,
-    center_z: f64,
-    size: f64,
-    lerp_target: f64,
-    lerp_time: i64,
-    warning_blocks: i32,
-    warning_time: i32,
-    damage_per_block: f32,
-    safe_zone: f32,
-) -> Worldborder {
-    Worldborder::from_saved(
-        center_x,
-        center_z,
-        size,
-        lerp_target,
-        lerp_time,
-        warning_blocks,
-        warning_time,
-        damage_per_block,
-        safe_zone,
-    )
-}
-
-fn load_scoreboard(root: &Path) -> Scoreboard {
-    let paths = [
-        minecraft_data_dir(root).join("scoreboard.dat"),
-        root.join("data").join("scoreboard.dat"),
-    ];
-    for path in &paths {
-        if let ReadGzip::Compound(file) = read_gzip(path) {
-            return Scoreboard::from_nbt(&file);
-        }
-    }
-    Scoreboard::default()
-}
-
-fn write_border(root: &Path, dimension_name: &str, border: &Worldborder, data_version: i32) {
-    let mut data = NbtCompound::new();
-    data.put_double("center_x", border.center_x);
-    data.put_double("center_z", border.center_z);
-    data.put_double("size", border.saved_size());
-    data.put_double("lerp_target", border.new_diameter);
-    data.put_long("lerp_time", border.speed);
-    data.put_double("damage_per_block", f64::from(border.damage_per_block));
-    data.put_double("safe_zone", f64::from(border.buffer));
-    data.put_int("warning_blocks", border.warning_blocks);
-    data.put_int("warning_time", border.warning_time);
-    write_saved_file(
-        &dimension_border_path(root, dimension_name),
-        data,
-        data_version,
-    );
-}
-
-fn write_clock(root: &Path, clock_id: &str, time: &LevelTime, data_version: i32) {
-    let path = minecraft_data_dir(root).join("world_clocks.dat");
-    let mut data = match read_gzip(&path) {
-        ReadGzip::Compound(file) => file.get_compound("data").cloned().unwrap_or_default(),
-        ReadGzip::Missing => NbtCompound::new(),
-        ReadGzip::Failed => {
-            warn!("Leaving world_clocks.dat unchanged because it could not be read");
-            return;
-        }
-    };
-    let mut clock = data.get_compound(clock_id).cloned().unwrap_or_default();
-    clock.put_long("total_ticks", time.time_of_day);
-    clock.put_float("partial_tick", time.partial_tick);
-    clock.put_float("rate", time.rate);
-    clock.put_bool("paused", time.paused);
-    data.put_compound(clock_id, clock);
-    data.put_int("DataVersion", data_version);
-    let mut root_tag = NbtCompound::new();
-    root_tag.put_compound("data", data);
-    if let Err(error) = write_gzip(&path, root_tag) {
-        warn!("Failed to write {}: {error}", path.display());
-    }
-}
-
-fn write_saved_weather(root: &Path, weather: &Weather, data_version: i32) {
-    let data = WeatherData {
-        rain_time: weather.rain_time,
-        raining: weather.raining,
-        thundering: weather.thundering,
-        thunder_time: weather.thunder_time,
-        clear_weather_time: weather.clear_weather_time,
-        data_version,
-    };
-    if let Err(error) = data_files::write_weather(root, &data) {
-        warn!("Failed to write weather.dat: {error}");
-    }
-}
-
-fn write_scoreboard(root: &Path, scoreboard: &Scoreboard, data_version: i32) {
-    let path = minecraft_data_dir(root).join("scoreboard.dat");
-    if let Err(error) = write_gzip(&path, scoreboard.to_nbt(data_version)) {
-        warn!("Failed to write {}: {error}", path.display());
-    }
-}
-
-fn stamp_world_age(root: &Path, world_age: i64) {
-    let path = root.join("level.dat");
-    let mut root_tag = match read_gzip(&path) {
-        ReadGzip::Compound(root_tag) => root_tag,
-        ReadGzip::Missing => NbtCompound::new(),
-        ReadGzip::Failed => {
-            warn!("Leaving level.dat unchanged because it could not be read");
-            return;
-        }
-    };
-    let mut data = root_tag.get_compound("Data").cloned().unwrap_or_default();
-    data.put_long("Time", world_age);
-    root_tag.put_compound("Data", data);
-    if let Err(error) = write_gzip(&path, root_tag) {
-        warn!("Failed to write {}: {error}", path.display());
-    }
-}
-
-fn store_overworld_level_info(
-    level_info: &Arc<ArcSwap<LevelData>>,
-    time: &LevelTime,
-    weather: &Weather,
-    border: &Worldborder,
-) {
-    let updated = {
-        let current = level_info.load();
-        let mut updated = (**current).clone();
-        updated.day_time = time.time_of_day;
-        updated.clear_weather_time = weather.clear_weather_time;
-        updated.border_center_x = border.center_x;
-        updated.border_center_z = border.center_z;
-        updated.border_size = border.saved_size();
-        updated.border_size_lerp_target = border.new_diameter;
-        updated.border_size_lerp_time = border.speed;
-        updated.border_damage_per_block = f64::from(border.damage_per_block);
-        updated.border_safe_zone = f64::from(border.buffer);
-        updated.border_warning_blocks = f64::from(border.warning_blocks);
-        updated.border_warning_time = f64::from(border.warning_time);
-        updated
-    };
-    level_info.store(Arc::new(updated));
-}
-
-fn write_saved_file(path: &Path, data: NbtCompound, data_version: i32) {
-    let mut root = NbtCompound::new();
-    root.put_int("DataVersion", data_version);
-    root.put_compound("data", data);
-    if let Err(error) = write_gzip(path, root) {
-        warn!("Failed to write {}: {error}", path.display());
-    }
+const fn double_as_f32(value: f64) -> f32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "border damage and the safe zone are f32 on the live border"
+    )]
+    let narrowed = value as f32;
+    if narrowed.is_finite() { narrowed } else { 0.0 }
 }
 
 fn read_gzip(path: &Path) -> ReadGzip {
@@ -414,169 +348,23 @@ fn read_gzip(path: &Path) -> ReadGzip {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return ReadGzip::Missing,
         Err(error) => {
-            warn!("Failed to open {}: {error}", path.display());
+            tracing::warn!("Failed to open {}: {error}", path.display());
             return ReadGzip::Failed;
         }
     };
     match read_gzip_compound_tag(file) {
         Ok(compound) => ReadGzip::Compound(compound),
         Err(error) => {
-            warn!("Failed to read {}: {error}", path.display());
+            tracing::warn!("Failed to read {}: {error}", path.display());
             ReadGzip::Failed
         }
-    }
-}
-
-fn write_gzip(path: &Path, compound: NbtCompound) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp_path = path.with_extension("tmp");
-    let file = File::create(&temp_path)?;
-    if let Err(error) = write_gzip_compound_tag(compound, file) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(std::io::Error::other(error));
-    }
-    std::fs::rename(&temp_path, path)
-}
-
-fn has_any(compound: &NbtCompound, keys: &[&str]) -> bool {
-    keys.iter().any(|key| compound.has(key))
-}
-
-fn saved_bool(compound: &NbtCompound, keys: &[&str]) -> Option<bool> {
-    for key in keys {
-        if let Some(value) = compound.get_bool(key) {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn saved_i64(compound: &NbtCompound, keys: &[&str]) -> Option<i64> {
-    for key in keys {
-        if let Some(value) = compound.get_long(key) {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_int(key) {
-            return Some(i64::from(value));
-        }
-    }
-    None
-}
-
-fn saved_i32(compound: &NbtCompound, keys: &[&str]) -> Option<i32> {
-    for key in keys {
-        if let Some(value) = compound.get_int(key) {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_long(key)
-            && let Ok(value) = i32::try_from(value)
-        {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_double(key)
-            && let Some(value) = f64_to_i32(value)
-        {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_float(key)
-            && let Some(value) = f64_to_i32(f64::from(value))
-        {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn saved_f64(compound: &NbtCompound, keys: &[&str]) -> Option<f64> {
-    for key in keys {
-        if let Some(value) = compound.get_double(key) {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_float(key) {
-            return Some(f64::from(value));
-        }
-        if let Some(value) = compound.get_int(key) {
-            return Some(f64::from(value));
-        }
-        if let Some(value) = compound.get_long(key) {
-            return Some(i64_to_f64(value));
-        }
-    }
-    None
-}
-
-fn saved_f32(compound: &NbtCompound, keys: &[&str]) -> Option<f32> {
-    for key in keys {
-        if let Some(value) = compound.get_float(key) {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_double(key)
-            && let Some(value) = f64_to_f32(value)
-        {
-            return Some(value);
-        }
-        if let Some(value) = compound.get_int(key) {
-            return Some(i32_to_f32(value));
-        }
-    }
-    None
-}
-
-fn f64_to_i32(value: f64) -> Option<i32> {
-    if !value.is_finite() {
-        return None;
-    }
-    let rounded = value.round();
-    if rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
-        return None;
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rounded value was checked against i32 limits"
-    )]
-    Some(rounded as i32)
-}
-
-fn f64_to_f32(value: f64) -> Option<f32> {
-    if !value.is_finite() {
-        return None;
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "clock rate and border damage are f32 on the live objects"
-    )]
-    let narrowed = value as f32;
-    narrowed.is_finite().then_some(narrowed)
-}
-
-const fn i64_to_f64(value: i64) -> f64 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "border coordinates and sizes fit in the f64 mantissa"
-    )]
-    {
-        value as f64
-    }
-}
-
-const fn i32_to_f32(value: i32) -> f32 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "warning distances and short timers fit in the f32 mantissa"
-    )]
-    {
-        value as f32
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use pumpkin_data::dimension::Dimension;
     use pumpkin_data::scoreboard::ScoreboardDisplaySlot;
     use pumpkin_nbt::compound::NbtCompound;
@@ -584,25 +372,12 @@ mod tests {
     use pumpkin_nbt::tag::NbtTag;
     use pumpkin_protocol::java::client::play::RenderType;
     use pumpkin_util::text::TextComponent;
-    use pumpkin_util::text::color::NamedColor;
     use pumpkin_util::world_seed::Seed;
     use pumpkin_world::world_info::LevelData;
-    use pumpkin_world::world_info::data_files::{
-        DimensionClock, game_rules_from_nbt, minecraft_data_dir, read_game_rules, read_weather,
-        read_world_clocks, write_game_rules, write_scoreboard_stub, write_weather,
-        write_world_clocks,
-    };
+    use pumpkin_world::world_info::data_files::minecraft_data_dir;
 
-    use super::{load_level_state, persist_level_state};
-    use crate::world::border::Worldborder;
-    use crate::world::scoreboard::{
-        CollisionRule, NameTagVisibility, NoTarget, Scoreboard, ScoreboardObjective, Team,
-    };
-    use crate::world::time::LevelTime;
-    use crate::world::weather::Weather;
-
-    const FRIENDLY_FIRE: i8 = 1;
-    const SEE_FRIENDLY_INVISIBLES: i8 = 2;
+    use super::{load_level_state, load_scoreboard};
+    use crate::world::scoreboard::{NoTarget, Scoreboard, ScoreboardObjective};
 
     fn write_nbt(path: &std::path::Path, compound: NbtCompound) {
         if let Some(parent) = path.parent() {
@@ -619,13 +394,10 @@ mod tests {
         root
     }
 
-    fn level_dat(time: i64, day_time: i64, border_size: f64) -> NbtCompound {
+    fn level_dat(time: i64, day_time: i64) -> NbtCompound {
         let mut data = NbtCompound::new();
         data.put_long("Time", time);
         data.put_long("DayTime", day_time);
-        data.put_double("BorderCenterX", 1.0);
-        data.put_double("BorderCenterZ", 2.0);
-        data.put_double("BorderSize", border_size);
         let mut root = NbtCompound::new();
         root.put_compound("Data", data);
         root
@@ -638,11 +410,10 @@ mod tests {
         overworld_clock.put_float("rate", 2.0);
         overworld_clock.put_bool("paused", true);
         let mut end_clock = NbtCompound::new();
-        end_clock.put_long("totalTicks", 100);
+        end_clock.put_long("total_ticks", 100);
         let mut clocks = NbtCompound::new();
         clocks.put_compound("minecraft:overworld", overworld_clock);
         clocks.put_compound("minecraft:the_end", end_clock);
-        clocks.put_int("DataVersion", 1);
         write_nbt(
             &minecraft_data_dir(root).join("world_clocks.dat"),
             saved_root(clocks),
@@ -662,11 +433,11 @@ mod tests {
         let mut border = NbtCompound::new();
         border.put_double("center_x", 10.5);
         border.put_double("center_z", -20.0);
-        border.put_double("size", 128.0);
-        border.put_double("lerp_target", 128.0);
-        border.put_long("lerp_time", 0);
+        border.put_double("size", 0.0);
+        border.put_double("lerp_target", 100.0);
+        border.put_long("lerp_time", 4);
         border.put_int("warning_blocks", 3);
-        border.put_double("warning_time", 10.0);
+        border.put_int("warning_time", 10);
         border.put_double("damage_per_block", 0.5);
         border.put_double("safe_zone", 1.0);
         write_nbt(
@@ -683,7 +454,7 @@ mod tests {
         let mut objective = NbtCompound::new();
         objective.put_string("Name", "kills".to_string());
         objective.put_string("CriteriaName", "dummy".to_string());
-        objective.put_string("DisplayName", r#"{"text":"Kills"}"#.to_string());
+        objective.put_string("DisplayName", "Kills".to_string());
         objective.put_string("RenderType", "integer".to_string());
         let mut score = NbtCompound::new();
         score.put_string("Name", "Steve".to_string());
@@ -700,7 +471,7 @@ mod tests {
             &minecraft_data_dir(root).join("scoreboard.dat"),
             saved_root(board),
         );
-        write_nbt(&root.join("level.dat"), level_dat(50_000, 1, 999.0));
+        write_nbt(&root.join("level.dat"), level_dat(50_000, 1));
     }
 
     #[test]
@@ -722,33 +493,24 @@ mod tests {
         assert_eq!(overworld.weather.thunder_time, 800);
         assert_eq!(overworld.weather.clear_weather_time, 15);
         assert_eq!(overworld.weather.rain_level, 1.0);
-        assert_eq!(overworld.weather.thunder_level, 1.0);
         assert_eq!(overworld.border.center_x, 10.5);
         assert_eq!(overworld.border.center_z, -20.0);
-        assert_eq!(overworld.border.new_diameter, 128.0);
+        assert_eq!(overworld.border.saved_size(), 0.0);
+        assert_eq!(overworld.border.new_diameter, 100.0);
+        assert_eq!(overworld.border.saved_lerp_time(), 4);
         assert_eq!(overworld.border.warning_blocks, 3);
         assert_eq!(overworld.border.warning_time, 10);
         assert_eq!(overworld.border.damage_per_block, 0.5);
         assert_eq!(overworld.border.buffer, 1.0);
-        let kills = overworld.scoreboard.get_objective("kills").unwrap();
+
+        let scoreboard = load_scoreboard(root);
+        let kills = scoreboard.get_objective("kills").unwrap();
         assert_eq!(kills.criterion, "dummy");
         assert_eq!(kills.render_type, RenderType::Integer);
         assert_eq!(kills.display_name.clone().get_text(), "Kills");
+        assert_eq!(scoreboard.get_score_value("Steve", "kills"), Some(7));
         assert_eq!(
-            overworld.scoreboard.get_score_value("Steve", "kills"),
-            Some(7)
-        );
-        assert!(
-            !overworld
-                .scoreboard
-                .get_score("Steve", "kills")
-                .unwrap()
-                .locked
-        );
-        assert_eq!(
-            overworld
-                .scoreboard
-                .get_display_objective(ScoreboardDisplaySlot::Sidebar),
+            scoreboard.get_display_objective(ScoreboardDisplaySlot::Sidebar),
             Some("kills")
         );
 
@@ -756,32 +518,12 @@ mod tests {
         assert!(!nether.weather.raining);
         assert_eq!(nether.weather.clear_weather_time, 0);
         assert_eq!(nether.border.new_diameter, 5.999_996_8E7);
-        assert_eq!(nether.border.center_x, 0.0);
         assert_eq!(nether.time.time_of_day, 0);
         assert_eq!(nether.time.world_age, 50_000);
-        assert!(nether.scoreboard.get_objective("kills").is_some());
 
         let end = load_level_state(root, Dimension::THE_END.minecraft_name, &info);
         assert_eq!(end.time.time_of_day, 100);
         assert_eq!(end.time.world_age, 50_000);
-        assert_eq!(end.border.new_diameter, 5.999_996_8E7);
-    }
-
-    #[test]
-    fn game_rules_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut rules_data = NbtCompound::new();
-        rules_data.put("minecraft:keep_inventory", NbtTag::Byte(1));
-        rules_data.put("minecraft:random_tick_speed", NbtTag::Int(20));
-        let rules = game_rules_from_nbt(&saved_root(rules_data));
-        assert!(rules.keep_inventory);
-        assert_eq!(rules.random_tick_speed, 20);
-
-        let version = LevelData::default(Seed(1)).data_version;
-        write_game_rules(dir.path(), &rules, version).unwrap();
-        let loaded_rules = read_game_rules(dir.path());
-        assert!(loaded_rules.keep_inventory);
-        assert_eq!(loaded_rules.random_tick_speed, 20);
     }
 
     #[test]
@@ -797,161 +539,14 @@ mod tests {
         assert!(!loaded.time.paused);
         assert_eq!(loaded.time.rate, 1.0);
         assert!(!loaded.weather.raining);
-        assert!(!loaded.weather.thundering);
         assert_eq!(loaded.weather.clear_weather_time, 0);
-        assert_eq!(loaded.border.center_x, 0.0);
-        assert_eq!(loaded.border.center_z, 0.0);
         assert_eq!(loaded.border.new_diameter, 5.999_996_8E7);
-        assert_eq!(loaded.border.old_diameter, 5.999_996_8E7);
         assert_eq!(loaded.border.warning_blocks, 5);
         assert_eq!(loaded.border.warning_time, 300);
         assert_eq!(loaded.border.damage_per_block, 0.0);
         assert_eq!(loaded.border.buffer, 0.0);
-        assert_eq!(loaded.border.speed, 0);
-        assert!(loaded.scoreboard.get_objectives().is_empty());
-
-        let rules = read_game_rules(dir.path());
-        assert!(!rules.keep_inventory);
-        assert_eq!(rules.random_tick_speed, 3);
-    }
-
-    fn sample_scoreboard() -> Scoreboard {
-        let mut scoreboard = Scoreboard::default();
-        scoreboard.add_objective(
-            &NoTarget,
-            ScoreboardObjective::new(
-                "kills",
-                TextComponent::text("Kills"),
-                RenderType::Integer,
-                None,
-                "dummy",
-            ),
-        );
-        scoreboard.set_score_value(&NoTarget, "Steve", "kills", 7);
-        scoreboard.add_team(
-            &NoTarget,
-            Team {
-                name: "red".to_string(),
-                display_name: TextComponent::text("Red"),
-                options: FRIENDLY_FIRE | SEE_FRIENDLY_INVISIBLES,
-                nametag_visibility: NameTagVisibility::Never,
-                collision_rule: CollisionRule::Never,
-                color: NamedColor::Red,
-                player_prefix: TextComponent::text(""),
-                player_suffix: TextComponent::text(""),
-                players: vec!["Steve".to_string()],
-            },
-        );
-        scoreboard
-    }
-
-    fn rewrite_like_level_writer(root: &std::path::Path, info: &LevelData) {
-        let mut clocks = read_world_clocks(root);
-        clocks.data_version = info.data_version;
-        clocks
-            .clocks
-            .entry(Dimension::OVERWORLD.minecraft_name.to_string())
-            .and_modify(|clock| clock.total_ticks = info.day_time)
-            .or_insert(DimensionClock {
-                total_ticks: info.day_time,
-            });
-        write_world_clocks(root, &clocks).unwrap();
-        let mut saved_weather = read_weather(root);
-        saved_weather.clear_weather_time = info.clear_weather_time;
-        saved_weather.data_version = info.data_version;
-        write_weather(root, &saved_weather).unwrap();
-        write_scoreboard_stub(root, info.data_version).unwrap();
-    }
-
-    #[test]
-    fn round_trip_survives_level_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let mut level_data = LevelData::default(Seed(1));
-        level_data.game_rules.keep_inventory = true;
-        let level_info = Arc::new(ArcSwap::from_pointee(level_data));
-
-        let mut time = LevelTime::new();
-        time.restore(18_000, 50_000, 0.25, 2.0, true);
-        let weather = Weather::from_saved(40, 1_200, 800, true, false);
-        let border = Worldborder::from_saved(4.0, 8.0, 256.0, 256.0, 0, 5, 300, 0.5, 1.0);
-        persist_level_state(
-            root,
-            Dimension::OVERWORLD.minecraft_name,
-            &time,
-            &weather,
-            &border,
-            &sample_scoreboard(),
-            &level_info,
-        );
-        let mut end_time = LevelTime::new();
-        end_time.restore(100, 50_000, 0.0, 1.0, false);
-        persist_level_state(
-            root,
-            Dimension::THE_END.minecraft_name,
-            &end_time,
-            &Weather::new(),
-            &Worldborder::vanilla_default(),
-            &Scoreboard::default(),
-            &level_info,
-        );
-        persist_level_state(
-            root,
-            Dimension::THE_NETHER.minecraft_name,
-            &LevelTime::new(),
-            &Weather::new(),
-            &Worldborder::vanilla_default(),
-            &Scoreboard::default(),
-            &level_info,
-        );
-
-        let info = level_info.load();
-        assert!(info.game_rules.keep_inventory);
-        assert_eq!(info.day_time, 18_000);
-        assert_eq!(info.clear_weather_time, 40);
-        assert_eq!(info.border_center_x, 4.0);
-        assert_eq!(info.border_center_z, 8.0);
-        assert_eq!(info.border_size, 256.0);
-        assert_eq!(info.border_size_lerp_target, 256.0);
-        assert_eq!(info.border_size_lerp_time, 0);
-        rewrite_like_level_writer(root, &info);
-        drop(info);
-
-        let loaded = load_level_state(
-            root,
-            Dimension::OVERWORLD.minecraft_name,
-            &level_info.load(),
-        );
-        assert_eq!(loaded.time.time_of_day, 18_000);
-        assert_eq!(loaded.time.world_age, 50_000);
-        assert_eq!(loaded.time.partial_tick, 0.25);
-        assert_eq!(loaded.time.rate, 2.0);
-        assert!(loaded.time.paused);
-        assert!(loaded.weather.raining);
-        assert!(!loaded.weather.thundering);
-        assert_eq!(loaded.weather.rain_time, 1_200);
-        assert_eq!(loaded.weather.clear_weather_time, 40);
-        assert_eq!(loaded.border.center_x, 4.0);
-        assert_eq!(loaded.border.center_z, 8.0);
-        assert_eq!(loaded.border.new_diameter, 256.0);
-        assert_eq!(loaded.border.damage_per_block, 0.5);
-        assert_eq!(loaded.border.buffer, 1.0);
-        assert_eq!(loaded.scoreboard.get_score_value("Steve", "kills"), Some(7));
-        let team = loaded.scoreboard.get_team("red").unwrap();
-        assert_eq!(team.options, FRIENDLY_FIRE | SEE_FRIENDLY_INVISIBLES);
-        assert_eq!(team.nametag_visibility, NameTagVisibility::Never);
-        assert_eq!(team.players, vec!["Steve".to_string()]);
-        assert!(level_info.load().game_rules.keep_inventory);
-
-        let end = load_level_state(root, Dimension::THE_END.minecraft_name, &level_info.load());
-        assert_eq!(end.time.time_of_day, 100);
-        let nether = load_level_state(
-            root,
-            Dimension::THE_NETHER.minecraft_name,
-            &level_info.load(),
-        );
-        assert_eq!(nether.border.new_diameter, 5.999_996_8E7);
-        assert_eq!(nether.time.time_of_day, 0);
+        assert_eq!(loaded.border.saved_lerp_time(), 0);
+        assert!(load_scoreboard(dir.path()).get_objectives().is_empty());
     }
 
     #[test]
@@ -979,25 +574,60 @@ mod tests {
         assert!(loaded.weather.raining);
         assert!(!loaded.weather.thundering);
         assert_eq!(loaded.weather.rain_time, 300);
-        assert_eq!(loaded.weather.clear_weather_time, 0);
         assert_eq!(loaded.border.center_x, 12.0);
-        assert_eq!(loaded.border.center_z, -4.0);
         assert_eq!(loaded.border.new_diameter, 512.0);
-        assert!(
-            !root
-                .join("dimensions")
-                .join("minecraft")
-                .join("overworld")
-                .join("data")
-                .join("minecraft")
-                .join("world_border.dat")
-                .exists()
-        );
 
         let nether = load_level_state(root, Dimension::THE_NETHER.minecraft_name, &info);
         assert_eq!(nether.time.time_of_day, 0);
-        assert_eq!(nether.time.world_age, 90_000);
         assert!(!nether.weather.raining);
         assert_eq!(nether.border.new_diameter, 5.999_996_8E7);
+    }
+
+    #[test]
+    fn plain_text_is_stored_as_a_string_tag() {
+        let mut scoreboard = Scoreboard::default();
+        scoreboard.add_objective(
+            &NoTarget,
+            ScoreboardObjective::new(
+                "kills",
+                TextComponent::text("Kills"),
+                RenderType::Integer,
+                None,
+                "dummy",
+            ),
+        );
+        let saved = scoreboard.to_nbt(1);
+        let objective = saved
+            .get_compound("data")
+            .unwrap()
+            .get_list("Objectives")
+            .unwrap()[0]
+            .extract_compound()
+            .unwrap();
+        assert_eq!(
+            objective.get("DisplayName"),
+            Some(&NbtTag::String("Kills".into()))
+        );
+    }
+
+    #[test]
+    fn a_string_tag_is_literal_text() {
+        let mut objective = NbtCompound::new();
+        objective.put_string("Name", "kills".to_string());
+        objective.put_string("CriteriaName", "dummy".to_string());
+        objective.put_string("DisplayName", r#"{"text":"Kills"}"#.to_string());
+        objective.put_string("RenderType", "integer".to_string());
+        let mut board = NbtCompound::new();
+        board.put_list("Objectives", vec![NbtTag::Compound(objective)]);
+        let loaded = Scoreboard::from_nbt(&saved_root(board));
+        assert_eq!(
+            loaded
+                .get_objective("kills")
+                .unwrap()
+                .display_name
+                .clone()
+                .get_text(),
+            r#"{"text":"Kills"}"#
+        );
     }
 }

@@ -97,6 +97,11 @@ pub struct LevelData {
     /// Persisted to `data/minecraft/weather.dat`.
     #[serde(rename = "clearWeatherTime", skip_serializing, default)]
     pub clear_weather_time: i32,
+
+    /// Live clock, weather, border, and scoreboard filled in before a save.
+    /// The world-info writer is the only thing that turns this into files.
+    #[serde(skip)]
+    pub saved_level: Option<data_files::SavedLevelSnapshot>,
 }
 
 const DEFAULT_BORDER_DAMAGE_PER_BLOCK: f64 = 0.2;
@@ -556,6 +561,7 @@ impl LevelData {
             world_gen_settings: WorldGenSettings::new(seed),
             day_time: 0,
             clear_weather_time: -1,
+            saved_level: None,
         }
     }
 
