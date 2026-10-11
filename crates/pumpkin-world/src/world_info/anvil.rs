@@ -455,6 +455,7 @@ impl WorldInfoWriter for AnvilLevelInfo {
     fn write_world_info(
         &self,
         info: &LevelData,
+        saved: Option<&crate::world_info::data_files::SavedLevelSnapshot>,
         level_folder: &Path,
     ) -> Result<(), WorldInfoError> {
         fs::create_dir_all(level_folder)?;
@@ -476,7 +477,7 @@ impl WorldInfoWriter for AnvilLevelInfo {
             .cloned()
             .unwrap_or_default();
         level_data_to_nbt(&level_data, &mut data_comp);
-        if let Some(saved) = &level_data.saved_level {
+        if let Some(saved) = saved {
             data_comp.put_long("Time", saved.world_age);
         }
         root.put_compound(LEVEL_DATA_TAG, data_comp);
@@ -505,7 +506,7 @@ impl WorldInfoWriter for AnvilLevelInfo {
             error!("Failed to write world_gen_settings.dat: {e}");
         }
 
-        if let Some(saved) = &info.saved_level {
+        if let Some(saved) = saved {
             write_saved_level(level_folder, saved, data_version);
         } else {
             // world_clocks.dat – persist the overworld day_time; preserve other
@@ -555,7 +556,7 @@ impl WorldInfoWriter for AnvilLevelInfo {
         }
 
         // scoreboard.dat
-        if info.saved_level.is_none()
+        if saved.is_none()
             && let Err(e) = write_scoreboard_stub(level_folder, data_version)
         {
             error!("Failed to write scoreboard.dat: {e}");
@@ -601,7 +602,10 @@ mod test {
             DataPacks, LevelData, MAXIMUM_SUPPORTED_LEVEL_VERSION,
             MAXIMUM_SUPPORTED_WORLD_DATA_VERSION, MINIMUM_SUPPORTED_LEVEL_VERSION,
             MINIMUM_SUPPORTED_WORLD_DATA_VERSION, WorldGenSettings, WorldInfoError, WorldVersion,
-            data_files::{minecraft_data_dir, read_world_gen_settings, write_world_gen_settings},
+            data_files::{
+                DimensionClock, SavedBorder, SavedLevelSnapshot, WeatherData, minecraft_data_dir,
+                read_world_gen_settings, write_world_gen_settings,
+            },
         },
     };
 
@@ -662,12 +666,86 @@ mod test {
         let temp_dir = TempDir::new().unwrap();
 
         AnvilLevelInfo
-            .write_world_info(&data, temp_dir.path())
+            .write_world_info(&data, None, temp_dir.path())
             .unwrap();
 
         let data = AnvilLevelInfo.read_world_info(temp_dir.path()).unwrap();
 
         assert_eq!(data.world_gen_settings.seed, seed);
+    }
+
+    fn snapshot(world_age: i64, size: f64, lerp_time: i64) -> SavedLevelSnapshot {
+        SavedLevelSnapshot {
+            world_age,
+            clocks: vec![(
+                "minecraft:overworld".to_string(),
+                DimensionClock::ticks(world_age),
+            )],
+            weather: WeatherData::default(),
+            scoreboard: NbtCompound::new(),
+            borders: vec![SavedBorder {
+                dimension: "minecraft:overworld".to_string(),
+                center_x: 1.0,
+                center_z: 2.0,
+                size,
+                lerp_target: size,
+                lerp_time,
+                damage_per_block: 0.2,
+                safe_zone: 5.0,
+                warning_blocks: 5,
+                warning_time: 15,
+            }],
+        }
+    }
+
+    fn read_saved_border(level_folder: &Path) -> NbtCompound {
+        let path = level_folder
+            .join("dimensions")
+            .join("minecraft")
+            .join("overworld")
+            .join("data")
+            .join("minecraft")
+            .join("world_border.dat");
+        read_gzip_compound_tag(File::open(path).unwrap()).unwrap()
+    }
+
+    /// Two saves of the same `LevelData` keep the snapshot they were given.
+    /// The snapshot is an argument, so one save cannot clear it for the other.
+    #[test]
+    fn successive_saves_keep_their_own_snapshots() {
+        let temp_dir = TempDir::new().unwrap();
+        let level = LevelData::default(Seed(1));
+        let before = level.clone();
+        let first = snapshot(100, 10.0, 40);
+        let second = snapshot(250, 80.0, 0);
+
+        AnvilLevelInfo
+            .write_world_info(&level, Some(&first), temp_dir.path())
+            .unwrap();
+        assert_eq!(level, before);
+        let root = read_level_dat(temp_dir.path());
+        assert_eq!(
+            root.get_compound("Data").unwrap().get_long("Time"),
+            Some(100)
+        );
+        let border = read_saved_border(temp_dir.path());
+        let border_data = border.get_compound("data").unwrap();
+        assert_eq!(border_data.get_double("size"), Some(10.0));
+        assert_eq!(border_data.get_long("lerp_time"), Some(40));
+
+        AnvilLevelInfo
+            .write_world_info(&level, Some(&second), temp_dir.path())
+            .unwrap();
+        assert_eq!(level, before);
+        let root = read_level_dat(temp_dir.path());
+        assert_eq!(
+            root.get_compound("Data").unwrap().get_long("Time"),
+            Some(250)
+        );
+        let border = read_saved_border(temp_dir.path());
+        let border_data = border.get_compound("data").unwrap();
+        assert_eq!(border_data.get_double("size"), Some(80.0));
+        assert_eq!(border_data.get_long("lerp_time"), Some(0));
     }
 
     #[test]
@@ -676,7 +754,7 @@ mod test {
         let level_folder = temp_dir.path().join("world");
 
         AnvilLevelInfo
-            .write_world_info(&LevelData::default(Seed(42)), &level_folder)
+            .write_world_info(&LevelData::default(Seed(42)), None, &level_folder)
             .unwrap();
 
         assert!(level_folder.join(LEVEL_DAT_FILE_NAME).is_file());
@@ -699,7 +777,7 @@ mod test {
         File::create(&level_folder).unwrap();
 
         let error = AnvilLevelInfo
-            .write_world_info(&LevelData::default(Seed(42)), &level_folder)
+            .write_world_info(&LevelData::default(Seed(42)), None, &level_folder)
             .unwrap_err();
 
         let WorldInfoError::IoError(error) = error else {
@@ -787,7 +865,7 @@ mod test {
         let mut level_data = AnvilLevelInfo.read_world_info(temp_dir.path()).unwrap();
         level_data.level_name = "Renamed World".to_string();
         AnvilLevelInfo
-            .write_world_info(&level_data, temp_dir.path())
+            .write_world_info(&level_data, None, temp_dir.path())
             .unwrap();
 
         let root = read_level_dat(temp_dir.path());
@@ -807,7 +885,7 @@ mod test {
 
         let imported = AnvilLevelInfo.read_world_info(temp_dir.path()).unwrap();
         AnvilLevelInfo
-            .write_world_info(&imported, temp_dir.path())
+            .write_world_info(&imported, None, temp_dir.path())
             .unwrap();
 
         let root = read_level_dat(temp_dir.path());
@@ -844,7 +922,7 @@ mod test {
         let temp_dir = TempDir::new().unwrap();
 
         AnvilLevelInfo
-            .write_world_info(&LevelData::default(Seed(8_675_309)), temp_dir.path())
+            .write_world_info(&LevelData::default(Seed(8_675_309)), None, temp_dir.path())
             .unwrap();
         fs::remove_dir_all(temp_dir.path().join("data")).unwrap();
 
@@ -870,7 +948,7 @@ mod test {
         original.map_id = 3;
 
         AnvilLevelInfo
-            .write_world_info(&original, temp_dir.path())
+            .write_world_info(&original, None, temp_dir.path())
             .unwrap();
 
         let root = read_level_dat(temp_dir.path());
@@ -994,7 +1072,6 @@ mod test {
                 series: "main".to_string(),
             },
             map_id: 0,
-            saved_level: None,
         },
     });
 
@@ -1108,7 +1185,7 @@ mod test {
         level_data.world_gen_settings = WorldGenSettings::new(Seed(9999));
 
         AnvilLevelInfo
-            .write_world_info(&level_data, temp_dir.path())
+            .write_world_info(&level_data, None, temp_dir.path())
             .unwrap();
 
         let data_dir = temp_dir.path().join("data").join("minecraft");

@@ -13,8 +13,6 @@ pub const DEFAULT_DIAMETER: f64 = 5.999_996_8E7;
 pub const DEFAULT_WARNING_BLOCKS: i32 = 5;
 /// Persisted default from `WorldBorder.Settings`. A brand-new live border uses 15.
 pub const DEFAULT_WARNING_TIME: i32 = 300;
-/// Client border packets measure the lerp in milliseconds. One tick is 50ms.
-const MILLIS_PER_TICK: i64 = 50;
 
 #[derive(Clone)]
 pub struct Worldborder {
@@ -77,7 +75,7 @@ impl Worldborder {
     ///
     /// A stationary border stores the same value for size and lerp target.
     /// A moving one stores the current diameter as the size and the destination
-    /// as the lerp target, with the remaining time in milliseconds.
+    /// as the lerp target, with the remaining time in ticks.
     #[expect(
         clippy::too_many_arguments,
         reason = "one argument per field stored in the border save"
@@ -129,6 +127,13 @@ impl Worldborder {
         self.current_size()
     }
 
+    /// Integer `/worldborder get` reports. Vanilla rounds the interpolated diameter.
+    #[must_use]
+    pub fn reported_size(&self) -> i32 {
+        let size = self.current_size();
+        (size + 0.5).floor() as i32
+    }
+
     /// `lerp_time` written to disk. Vanilla `getLerpTime` is the remaining ticks.
     #[must_use]
     pub const fn saved_lerp_time(&self) -> i64 {
@@ -148,19 +153,31 @@ impl Worldborder {
         }
     }
 
-    pub fn init_client(&self, client: &JavaClient) {
-        let from = self.current_size();
-        let millis = self.lerp_remaining.saturating_mul(MILLIS_PER_TICK);
-        if let Ok(data) = client.serialize_packet(&CInitializeWorldBorder::new(
+    /// 26.3 `ClientboundInitializeBorderPacket` writes `getLerpTime()` unchanged.
+    fn initialize_packet(&self) -> CInitializeWorldBorder {
+        CInitializeWorldBorder::new(
             self.center_x,
             self.center_z,
-            from,
+            self.current_size(),
             self.new_diameter,
-            millis.into(),
+            self.lerp_remaining.into(),
             self.portal_teleport_boundary.into(),
             self.warning_blocks.into(),
             self.warning_time.into(),
-        )) {
+        )
+    }
+
+    /// 26.3 `ClientboundSetBorderLerpSizePacket` writes `getLerpTime()` unchanged.
+    fn lerp_size_packet(&self) -> CSetBorderLerpSize {
+        CSetBorderLerpSize::new(
+            self.old_diameter,
+            self.new_diameter,
+            self.lerp_remaining.into(),
+        )
+    }
+
+    pub fn init_client(&self, client: &JavaClient) {
+        if let Ok(data) = client.serialize_packet(&self.initialize_packet()) {
             client.try_enqueue_packet(data);
         }
     }
@@ -172,26 +189,34 @@ impl Worldborder {
         world.broadcast_packet_all(&CSetBorderCenter::new(self.center_x, self.center_z));
     }
 
+    /// `speed` is the lerp length in ticks. `None` or zero snaps to `diameter`.
     pub fn set_diameter(&mut self, world: &World, diameter: f64, speed: Option<i64>) {
-        match speed {
-            Some(millis) if millis > 0 => {
-                let ticks = (millis / MILLIS_PER_TICK).max(1);
+        if self.apply_diameter(diameter, speed) {
+            world.broadcast_packet_all(&self.lerp_size_packet());
+        } else {
+            world.broadcast_packet_all(&CSetBorderSize::new(self.new_diameter));
+        }
+    }
+
+    /// Applies a diameter change without sending packets.
+    ///
+    /// Returns whether the border is now lerping. The packet duration is
+    /// `lerp_remaining`, in ticks.
+    fn apply_diameter(&mut self, diameter: f64, speed_ticks: Option<i64>) -> bool {
+        match speed_ticks {
+            Some(ticks) if ticks > 0 => {
                 self.old_diameter = self.current_size();
                 self.new_diameter = diameter;
                 self.lerp_duration = ticks;
                 self.lerp_remaining = ticks;
-                world.broadcast_packet_all(&CSetBorderLerpSize::new(
-                    self.old_diameter,
-                    self.new_diameter,
-                    ticks.saturating_mul(MILLIS_PER_TICK).into(),
-                ));
+                true
             }
             _ => {
                 self.old_diameter = diameter;
                 self.new_diameter = diameter;
                 self.lerp_duration = 0;
                 self.lerp_remaining = 0;
-                world.broadcast_packet_all(&CSetBorderSize::new(self.new_diameter));
+                false
             }
         }
     }
@@ -353,5 +378,52 @@ mod tests {
         assert_eq!(border.saved_lerp_time(), 0);
         assert_eq!(border.saved_size(), 100.0);
         assert_eq!(border.new_diameter, 100.0);
+    }
+
+    /// `/worldborder get` on a border moving from 0 to 1000 over 1200 ticks,
+    /// 800 ticks in, is 667. The target is still 1000.
+    #[test]
+    fn get_reports_the_interpolated_diameter() {
+        let mut border = Worldborder::from_saved(0.0, 0.0, 0.0, 1000.0, 1200, 5, 300, 0.0, 0.0);
+        for _ in 0..800 {
+            border.tick();
+        }
+
+        assert_eq!(border.reported_size(), 667);
+        assert_eq!(border.new_diameter, 1000.0);
+    }
+
+    /// Both client border packets carry the lerp length in ticks. 1200 ticks
+    /// is one minute; sending 1200 * 50 would animate for about fifty minutes.
+    #[test]
+    fn border_packets_carry_ticks() {
+        use std::io::Cursor;
+
+        use pumpkin_protocol::ClientPacket;
+        use pumpkin_protocol::codec::var_long::VarLong;
+        use pumpkin_util::version::JavaMinecraftVersion;
+
+        let mut border = Worldborder::new(0.0, 0.0, 0.0, 5, 300);
+        assert!(border.apply_diameter(1000.0, Some(1_200)));
+        assert_eq!(border.lerp_remaining, 1_200);
+
+        let version = JavaMinecraftVersion::V_26_3;
+        let mut lerp = Vec::new();
+        border
+            .lerp_size_packet()
+            .write_packet_data(&mut lerp, &version)
+            .unwrap();
+        // Two big-endian f64 diameters, then the varlong lerp time.
+        let lerp_time = VarLong::decode(&mut Cursor::new(&lerp[16..])).unwrap();
+        assert_eq!(lerp_time.0, 1_200);
+
+        let mut initialize = Vec::new();
+        border
+            .initialize_packet()
+            .write_packet_data(&mut initialize, &version)
+            .unwrap();
+        // Four big-endian f64s, then the varlong lerp time.
+        let initialize_time = VarLong::decode(&mut Cursor::new(&initialize[32..])).unwrap();
+        assert_eq!(initialize_time.0, 1_200);
     }
 }

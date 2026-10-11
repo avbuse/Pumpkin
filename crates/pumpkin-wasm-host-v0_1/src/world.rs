@@ -1687,8 +1687,10 @@ impl pumpkin::plugin::world::HostWorldBorder for PluginHostState {
         new_size: f64,
         time_seconds: u64,
     ) -> wasmtime::Result<()> {
-        let speed_millis = time_seconds.saturating_mul(1000);
-        self.set_diameter(border, new_size, Some(speed_millis))
+        // Vanilla runs 20 ticks per second. `set-diameter` takes ticks.
+        const TICKS_PER_SECOND: u64 = 20;
+        let speed_ticks = time_seconds.saturating_mul(TICKS_PER_SECOND);
+        self.set_diameter(border, new_size, Some(speed_ticks))
     }
 
     fn get_target_diameter(&mut self, border: Resource<WitWorldBorder>) -> wasmtime::Result<f64> {
@@ -1706,7 +1708,7 @@ impl pumpkin::plugin::world::HostWorldBorder for PluginHostState {
             .worldborder
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .speed)
+            .lerp_remaining)
     }
 
     fn get_warning_distance(&mut self, border: Resource<WitWorldBorder>) -> wasmtime::Result<i32> {

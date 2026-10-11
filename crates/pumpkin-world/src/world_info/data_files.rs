@@ -119,10 +119,10 @@ pub struct SavedBorder {
     pub warning_time: i32,
 }
 
-/// Live level state the world-info writer stores in one pass.
+/// Live level state passed to one `write_world_info` call.
 ///
-/// Absent on `LevelData` means the writer keeps its previous behaviour for
-/// clocks, weather, and the scoreboard stub.
+/// `None` means the writer keeps its previous behaviour for clocks, weather,
+/// and the scoreboard stub.
 #[derive(Clone, PartialEq, Debug)]
 pub struct SavedLevelSnapshot {
     pub world_age: i64,

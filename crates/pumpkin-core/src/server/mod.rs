@@ -39,6 +39,7 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_world::world_info::anvil::{
     AnvilLevelInfo, LEVEL_DAT_BACKUP_FILE_NAME, LEVEL_DAT_FILE_NAME,
 };
+use pumpkin_world::world_info::data_files::SavedLevelSnapshot;
 use pumpkin_world::world_info::{
     LevelData, MAXIMUM_SUPPORTED_LEVEL_VERSION, MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
     WorldInfoError, WorldInfoReader, WorldInfoWriter, WorldVersion,
@@ -207,7 +208,7 @@ impl Server {
                 );
                 let default_data =
                     LevelData::from_world_generator(basic_config.seed, &overworld_gen);
-                AnvilLevelInfo.write_world_info(&default_data, &world_path)?;
+                AnvilLevelInfo.write_world_info(&default_data, None, &world_path)?;
                 default_data
             }
             Err(
@@ -551,7 +552,7 @@ impl Server {
         Ok(())
     }
 
-    fn prepare_level_save(&self) -> LevelData {
+    fn prepare_level_save(&self) -> (LevelData, Option<SavedLevelSnapshot>) {
         let scoreboard = self
             .scoreboard
             .lock()
@@ -561,10 +562,9 @@ impl Server {
             &scoreboard,
         );
         drop(scoreboard);
-        if let Some(snapshot) = snapshot {
+        if let Some(snapshot) = snapshot.as_ref() {
             self.level_info.rcu(|current| {
                 let mut updated = (**current).clone();
-                updated.saved_level = Some(snapshot.clone());
                 updated.data_version = MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
                 updated.level_version = MAXIMUM_SUPPORTED_LEVEL_VERSION;
                 updated.world_version = WorldVersion::default();
@@ -594,44 +594,27 @@ impl Server {
                 Arc::new(updated)
             });
         }
-        let level_data = (**self.level_info.load()).clone();
-        // The snapshot is only for this write. Leaving it on `level_info` would
-        // make a later writer store a stale board.
-        self.level_info.rcu(|current| {
-            let mut updated = (**current).clone();
-            updated.saved_level = None;
-            Arc::new(updated)
-        });
-        level_data
+        ((**self.level_info.load()).clone(), snapshot)
     }
 
     pub fn save_world_info(&self) -> Result<(), WorldInfoError> {
-        let level_data = self.prepare_level_save();
+        let (level_data, snapshot) = self.prepare_level_save();
         let writer = Arc::clone(&self.world_info_writer);
         let path = self.basic_config.get_world_path();
-        let write = move || writer.write_world_info(&level_data, &path);
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    tokio::task::spawn_blocking(write)
-                        .await
-                        .unwrap_or_else(|error| {
-                            Err(WorldInfoError::SerializationError(error.to_string()))
-                        })
-                })
-            })
-        } else {
-            write()
-        }
+        tokio::task::block_in_place(|| {
+            writer.write_world_info(&level_data, snapshot.as_ref(), &path)
+        })
     }
 
     pub async fn save_world_info_async(&self) -> Result<(), WorldInfoError> {
-        let level_data = self.prepare_level_save();
+        let (level_data, snapshot) = self.prepare_level_save();
         let writer = Arc::clone(&self.world_info_writer);
         let path = self.basic_config.get_world_path();
-        tokio::task::spawn_blocking(move || writer.write_world_info(&level_data, &path))
-            .await
-            .unwrap_or_else(|error| Err(WorldInfoError::SerializationError(error.to_string())))
+        tokio::task::spawn_blocking(move || {
+            writer.write_world_info(&level_data, snapshot.as_ref(), &path)
+        })
+        .await
+        .unwrap_or_else(|error| Err(WorldInfoError::SerializationError(error.to_string())))
     }
 
     pub fn reload_datapacks(&self, server: &Arc<Self>) {
