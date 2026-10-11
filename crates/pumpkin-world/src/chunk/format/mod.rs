@@ -103,6 +103,87 @@ fn lowest_biome_section_y(root_tag: &NbtCompound) -> Option<i32> {
         .map(|y| y.min(0))
 }
 
+fn minecraft_block_id(block: &Block) -> String {
+    if block.name.starts_with("minecraft:") {
+        block.name.to_string()
+    } else {
+        format!("minecraft:{}", block.name)
+    }
+}
+
+/// A 5023 default state is stored as the block id alone.
+fn block_state_id_from_default_name(name: &str) -> BlockStateId {
+    Block::from_name(name).map_or(BlockStateId::AIR, |block| block.default_state.id)
+}
+
+/// Reads one palette entry.
+///
+/// 4903 entries are compounds with `Name` and optional `Properties`, including
+/// a default state that still carries its properties. 5023 non-default entries
+/// are compounds with `id` and `properties`. A 5023 default entry inside a
+/// compound list has one field: an empty name whose value is the block id.
+/// That is how a string is stored in a compound list, and the NBT reader may
+/// already have turned it back into a string before this runs.
+fn block_state_id_from_palette_compound(compound: &NbtCompound) -> BlockStateId {
+    if compound.child_tags.len() == 1
+        && let Some(pumpkin_nbt::tag::NbtTag::String(name)) = compound.get("")
+    {
+        return block_state_id_from_default_name(name);
+    }
+
+    if let Ok(entry) =
+        crate::generation::structure::template::PaletteEntry::from_nbt_compound(compound)
+        && let Some(state) =
+            crate::generation::structure::template::BlockStateResolver::resolve_simple(&entry)
+    {
+        return state.id;
+    }
+    BlockStateId::AIR
+}
+
+fn block_state_id_from_palette_tag(tag: &pumpkin_nbt::tag::NbtTag) -> BlockStateId {
+    match tag {
+        pumpkin_nbt::tag::NbtTag::String(name) => block_state_id_from_default_name(name),
+        pumpkin_nbt::tag::NbtTag::Compound(compound) => {
+            block_state_id_from_palette_compound(compound)
+        }
+        pumpkin_nbt::tag::NbtTag::Int(value) => BlockStateId::new_or_air(*value as u16),
+        pumpkin_nbt::tag::NbtTag::Short(value) => BlockStateId::new_or_air(*value as u16),
+        pumpkin_nbt::tag::NbtTag::Byte(value) => BlockStateId::new_or_air(*value as u16),
+        pumpkin_nbt::tag::NbtTag::Long(value) => BlockStateId::new_or_air(*value as u16),
+        _ => BlockStateId::AIR,
+    }
+}
+
+/// Writes one 5023 palette entry.
+///
+/// A default state is the block id. Any other state is `id` plus every
+/// property. When the palette mixes the two, the NBT list codec stores each
+/// block id under an empty name so the list can stay a compound list.
+fn block_state_palette_tag(id: BlockStateId) -> pumpkin_nbt::tag::NbtTag {
+    use pumpkin_nbt::tag::NbtTag;
+
+    let block = Block::from_state_id(id);
+    let name = minecraft_block_id(block);
+    if id == block.default_state.id {
+        return NbtTag::String(name.into());
+    }
+
+    let mut compound = NbtCompound::new();
+    compound.put_string("id", name);
+    if let Some(properties) = block.properties(id) {
+        let props = properties.to_props();
+        if !props.is_empty() {
+            let mut props_compound = NbtCompound::new();
+            for (key, value) in props {
+                props_compound.put_string(key, value.to_string());
+            }
+            compound.put_compound("properties", props_compound);
+        }
+    }
+    NbtTag::Compound(compound)
+}
+
 fn extract_u16_array(tag: &pumpkin_nbt::tag::NbtTag) -> Option<Box<[BlockStateId]>> {
     match tag {
         pumpkin_nbt::tag::NbtTag::IntArray(arr) => Some(
@@ -121,31 +202,7 @@ fn extract_u16_array(tag: &pumpkin_nbt::tag::NbtTag) -> Option<Box<[BlockStateId
                 .collect(),
         ),
         pumpkin_nbt::tag::NbtTag::List(list) => {
-            let ids: Box<[BlockStateId]> = list
-                .iter()
-                .map(|t| match t {
-                    pumpkin_nbt::tag::NbtTag::Int(x) => BlockStateId::new_or_air(*x as u16),
-                    pumpkin_nbt::tag::NbtTag::Short(x) => BlockStateId::new_or_air(*x as u16),
-                    pumpkin_nbt::tag::NbtTag::Byte(x) => BlockStateId::new_or_air(*x as u16),
-                    pumpkin_nbt::tag::NbtTag::Long(x) => BlockStateId::new_or_air(*x as u16),
-                    pumpkin_nbt::tag::NbtTag::Compound(compound) => {
-                        if let Ok(entry) =
-                            crate::generation::structure::template::PaletteEntry::from_nbt_compound(
-                                compound,
-                            )
-                            && let Some(state) =
-                                crate::generation::structure::template::BlockStateResolver::resolve_simple(
-                                    &entry,
-                                )
-                        {
-                            return state.id;
-                        }
-                        BlockStateId::AIR
-                    }
-                    _ => BlockStateId::AIR,
-                })
-                .collect();
-            Some(ids)
+            Some(list.iter().map(block_state_id_from_palette_tag).collect())
         }
         _ => None,
     }
@@ -561,27 +618,8 @@ impl ChunkData {
             let palette_tags: Vec<NbtTag> = block_states_nbt
                 .palette
                 .iter()
-                .map(|&id| {
-                    let block = Block::from_state_id(id);
-                    let mut comp = NbtCompound::new();
-                    let name = if block.name.starts_with("minecraft:") {
-                        block.name.to_string()
-                    } else {
-                        format!("minecraft:{}", block.name)
-                    };
-                    comp.put_string("Name", name);
-                    if let Some(props) = block.properties(id) {
-                        let prop_vec = props.to_props();
-                        if !prop_vec.is_empty() {
-                            let mut props_comp = NbtCompound::new();
-                            for (k, v) in prop_vec {
-                                props_comp.put_string(k, v.to_string());
-                            }
-                            comp.put_compound("Properties", props_comp);
-                        }
-                    }
-                    NbtTag::Compound(comp)
-                })
+                .copied()
+                .map(block_state_palette_tag)
                 .collect();
             bs_comp.put_list("palette", palette_tags);
             section_comp.put_compound("block_states", bs_comp);
@@ -1213,5 +1251,533 @@ mod tests {
                 .unwrap()
                 .id
         );
+    }
+
+    fn east_oak_stairs() -> BlockStateId {
+        Block::OAK_STAIRS
+            .from_properties(&[
+                ("facing", "east"),
+                ("half", "bottom"),
+                ("shape", "straight"),
+                ("waterlogged", "false"),
+            ])
+            .to_state_id(&Block::OAK_STAIRS)
+    }
+
+    fn stairs_properties() -> NbtCompound {
+        let mut props = NbtCompound::new();
+        props.put_string("facing", "east".to_string());
+        props.put_string("half", "bottom".to_string());
+        props.put_string("shape", "straight".to_string());
+        props.put_string("waterlogged", "false".to_string());
+        props
+    }
+
+    fn load_palette_section(palette: Vec<NbtTag>) -> crate::chunk::ChunkData {
+        use crate::chunk::ChunkData;
+        use pumpkin_util::math::vector2::Vector2;
+
+        let mut block_states = NbtCompound::new();
+        block_states.put("palette", NbtTag::List(palette));
+        let mut biomes = NbtCompound::new();
+        biomes.put(
+            "palette",
+            NbtTag::List(vec![NbtTag::String("minecraft:plains".into())]),
+        );
+        let mut section = NbtCompound::new();
+        section.put_byte("Y", 0);
+        section.put("block_states", NbtTag::Compound(block_states));
+        section.put("biomes", NbtTag::Compound(biomes));
+
+        let mut root = NbtCompound::new();
+        root.put_int("DataVersion", 4903);
+        root.put_int("xPos", 0);
+        root.put_int("zPos", 0);
+        root.put_int("yPos", 0);
+        root.put_string("Status", "minecraft:full".to_string());
+        root.put("sections", NbtTag::List(vec![NbtTag::Compound(section)]));
+        let bytes = pumpkin_nbt::Nbt::from(root).write();
+        ChunkData::from_bytes(&bytes, Vector2::new(0, 0)).expect("palette section parses")
+    }
+
+    fn read_root(bytes: &[u8]) -> NbtCompound {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let mut reader = pumpkin_nbt::deserializer::NbtReadHelperJava::new(&mut cursor);
+        pumpkin_nbt::Nbt::read(&mut reader)
+            .expect("chunk nbt")
+            .root_tag
+    }
+
+    fn section_by_y(root: &NbtCompound, y: i32) -> &NbtCompound {
+        root.get_list("sections")
+            .expect("sections")
+            .iter()
+            .find_map(|tag| {
+                let compound = tag.extract_compound()?;
+                (section_y(compound) == y).then_some(compound)
+            })
+            .expect("section")
+    }
+
+    fn block_palette(section: &NbtCompound) -> &[NbtTag] {
+        section
+            .get_compound("block_states")
+            .expect("block_states")
+            .get_list("palette")
+            .expect("palette")
+    }
+
+    #[test]
+    fn reads_4903_palette_including_default_states_that_carry_properties() {
+        let mut deepslate = NbtCompound::new();
+        deepslate.put_string("Name", "minecraft:deepslate".to_string());
+        let mut axis = NbtCompound::new();
+        axis.put_string("axis", "y".to_string());
+        deepslate.put_compound("Properties", axis);
+        let chunk = load_palette_section(vec![NbtTag::Compound(deepslate)]);
+        assert_eq!(
+            chunk.section.get_block_absolute_y(0, 0, 0),
+            Some(Block::DEEPSLATE.default_state.id)
+        );
+
+        let mut furnace = NbtCompound::new();
+        furnace.put_string("Name", "minecraft:furnace".to_string());
+        let mut props = NbtCompound::new();
+        props.put_string("facing", "north".to_string());
+        props.put_string("lit", "false".to_string());
+        furnace.put_compound("Properties", props);
+        let chunk = load_palette_section(vec![NbtTag::Compound(furnace)]);
+        assert_eq!(
+            chunk.section.get_block_absolute_y(0, 0, 0),
+            Some(Block::FURNACE.default_state.id)
+        );
+
+        let mut stairs = NbtCompound::new();
+        stairs.put_string("Name", "minecraft:oak_stairs".to_string());
+        stairs.put_compound("Properties", stairs_properties());
+        let chunk = load_palette_section(vec![NbtTag::Compound(stairs)]);
+        assert_eq!(
+            chunk.section.get_block_absolute_y(0, 0, 0),
+            Some(east_oak_stairs())
+        );
+
+        let mut air = NbtCompound::new();
+        air.put_string("Name", "minecraft:air".to_string());
+        let chunk = load_palette_section(vec![NbtTag::Compound(air)]);
+        assert_eq!(
+            chunk.section.get_block_absolute_y(0, 0, 0),
+            Some(Block::AIR.default_state.id)
+        );
+    }
+
+    #[test]
+    fn reads_5023_string_palette_as_default_states() {
+        let chunk = load_palette_section(vec![NbtTag::String("minecraft:deepslate".into())]);
+        assert_eq!(
+            chunk.section.get_block_absolute_y(0, 0, 0),
+            Some(Block::DEEPSLATE.default_state.id)
+        );
+        let chunk = load_palette_section(vec![NbtTag::String("minecraft:bedrock".into())]);
+        assert_eq!(
+            chunk.section.get_block_absolute_y(0, 0, 0),
+            Some(Block::BEDROCK.default_state.id)
+        );
+
+        let list = NbtTag::List(vec![
+            NbtTag::String("minecraft:air".into()),
+            NbtTag::String("minecraft:stone".into()),
+            NbtTag::String("minecraft:furnace".into()),
+        ]);
+        let ids = extract_u16_array(&list).expect("string palette");
+        assert_eq!(
+            ids.as_ref(),
+            [
+                Block::AIR.default_state.id,
+                Block::STONE.default_state.id,
+                Block::FURNACE.default_state.id,
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_5023_empty_named_default_entries_in_a_mixed_palette() {
+        let mut air = NbtCompound::new();
+        air.put_string("", "minecraft:air".to_string());
+        let mut stone = NbtCompound::new();
+        stone.put_string("", "minecraft:stone".to_string());
+        let mut furnace = NbtCompound::new();
+        furnace.put_string("", "minecraft:furnace".to_string());
+        let mut stairs = NbtCompound::new();
+        stairs.put_string("id", "minecraft:oak_stairs".to_string());
+        stairs.put_compound("properties", stairs_properties());
+
+        let list = NbtTag::List(vec![
+            NbtTag::Compound(air),
+            NbtTag::Compound(stone),
+            NbtTag::Compound(furnace),
+            NbtTag::Compound(stairs),
+        ]);
+        let ids = extract_u16_array(&list).expect("mixed palette");
+        assert_eq!(
+            ids.as_ref(),
+            [
+                Block::AIR.default_state.id,
+                Block::STONE.default_state.id,
+                Block::FURNACE.default_state.id,
+                east_oak_stairs(),
+            ]
+        );
+        assert_ne!(east_oak_stairs(), Block::OAK_STAIRS.default_state.id);
+    }
+
+    #[test]
+    fn writes_5023_palettes_and_round_trips_block_states() {
+        use crate::chunk::ChunkData;
+        use pumpkin_util::math::vector2::Vector2;
+
+        let stairs = east_oak_stairs();
+        let chunk = ChunkData::empty(2, -3);
+        chunk.set_block_absolute_y(1, 0, 2, Block::STONE.default_state.id);
+        chunk.set_block_absolute_y(2, 0, 2, Block::FURNACE.default_state.id);
+        chunk.set_block_absolute_y(3, 0, 2, stairs);
+
+        let bytes = ChunkData::to_bytes(&chunk).expect("serialize chunk");
+        let root = read_root(&bytes);
+        assert_eq!(root.get_int("DataVersion"), Some(5023));
+
+        let air_section = section_by_y(&root, -4);
+        let air_palette = block_palette(air_section);
+        assert!(
+            air_palette
+                .iter()
+                .all(|tag| matches!(tag, NbtTag::String(_))),
+            "a section of only default states is a string list"
+        );
+        assert!(
+            matches!(&air_palette[0], NbtTag::String(name) if name.as_ref() == "minecraft:air")
+        );
+        let biomes = air_section
+            .get_compound("biomes")
+            .expect("biomes")
+            .get_list("palette")
+            .expect("biome palette");
+        assert!(biomes.iter().all(|tag| matches!(tag, NbtTag::String(_))));
+
+        let mixed = block_palette(section_by_y(&root, 0));
+        assert!(
+            mixed.iter().any(
+                |tag| matches!(tag, NbtTag::String(name) if name.as_ref() == "minecraft:stone")
+            ),
+            "stone stays a block id"
+        );
+        assert!(
+            mixed.iter().any(
+                |tag| matches!(tag, NbtTag::String(name) if name.as_ref() == "minecraft:furnace")
+            ),
+            "a default furnace is the block id, not its properties"
+        );
+        let stairs_entry = mixed
+            .iter()
+            .find_map(|tag| match tag {
+                NbtTag::Compound(compound)
+                    if compound.get_string("id") == Some("minecraft:oak_stairs") =>
+                {
+                    Some(compound)
+                }
+                _ => None,
+            })
+            .expect("oak stairs compound");
+        assert!(stairs_entry.get_string("Name").is_none());
+        assert!(stairs_entry.get_compound("Properties").is_none());
+        let props = stairs_entry.get_compound("properties").expect("properties");
+        assert_eq!(props.get_string("facing"), Some("east"));
+        assert_eq!(props.get_string("half"), Some("bottom"));
+        assert_eq!(props.get_string("shape"), Some("straight"));
+        assert_eq!(props.get_string("waterlogged"), Some("false"));
+
+        // The bytes still contain the empty-named wrapper the list codec writes
+        // for a default state that shares a compound list with the stairs.
+        let wrapped_air = empty_named_block_id("minecraft:air");
+        assert!(
+            bytes
+                .windows(wrapped_air.len())
+                .any(|window| window == wrapped_air),
+            "mixed palette stores default states under an empty name"
+        );
+
+        let loaded =
+            ChunkData::from_bytes(&bytes, Vector2::new(2, -3)).expect("written chunk reloads");
+        assert_eq!(
+            loaded.section.get_block_absolute_y(0, 0, 0),
+            Some(Block::AIR.default_state.id)
+        );
+        assert_eq!(
+            loaded.section.get_block_absolute_y(1, 0, 2),
+            Some(Block::STONE.default_state.id)
+        );
+        assert_eq!(
+            loaded.section.get_block_absolute_y(2, 0, 2),
+            Some(Block::FURNACE.default_state.id)
+        );
+        assert_eq!(loaded.section.get_block_absolute_y(3, 0, 2), Some(stairs));
+        assert_eq!(
+            loaded.section.get_block_absolute_y(0, -64, 0),
+            Some(Block::AIR.default_state.id)
+        );
+    }
+
+    fn empty_named_block_id(block_id: &str) -> Vec<u8> {
+        let mut bytes = vec![8, 0, 0];
+        bytes.extend(
+            u16::try_from(block_id.len())
+                .expect("block id length")
+                .to_be_bytes(),
+        );
+        bytes.extend(block_id.as_bytes());
+        bytes
+    }
+
+    fn find_block_entity<'a>(root: &'a NbtCompound, id: &str, x: i32) -> &'a NbtCompound {
+        root.get_list("block_entities")
+            .expect("block_entities")
+            .iter()
+            .find_map(|tag| {
+                let compound = tag.extract_compound()?;
+                (compound.get_string("id") == Some(id) && compound.get_int("x") == Some(x))
+                    .then_some(compound)
+            })
+            .expect("block entity")
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn block_entity_and_entity_compounds_keep_their_original_tag_types() {
+        use std::sync::atomic::AtomicBool;
+
+        use crate::chunk::{ChunkData, ChunkEntityData};
+        use pumpkin_util::math::{position::BlockPos, vector2::Vector2};
+
+        let mut old_furnace = NbtCompound::new();
+        old_furnace.put_string("id", "minecraft:furnace".to_string());
+        old_furnace.put_int("x", 1);
+        old_furnace.put_int("y", 2);
+        old_furnace.put_int("z", 3);
+        old_furnace.put_short("cooking_time_spent", 4);
+        old_furnace.put_short("cooking_total_time", 200);
+        old_furnace.put_short("lit_time_remaining", 5);
+        old_furnace.put_short("lit_total_time", 1600);
+
+        let mut new_furnace = NbtCompound::new();
+        new_furnace.put_string("id", "minecraft:furnace".to_string());
+        new_furnace.put_int("x", 2);
+        new_furnace.put_int("y", 2);
+        new_furnace.put_int("z", 3);
+        new_furnace.put_int("cooking_time_spent", 6);
+        new_furnace.put_int("cooking_total_time", 200);
+        new_furnace.put_int("lit_time_remaining", 7);
+        new_furnace.put_int("lit_total_time", 1600);
+        new_furnace.put_float("speed_multiplier", 1.0);
+
+        let mut old_stand = NbtCompound::new();
+        old_stand.put_string("id", "minecraft:brewing_stand".to_string());
+        old_stand.put_int("x", 3);
+        old_stand.put_int("y", 2);
+        old_stand.put_int("z", 3);
+        old_stand.put_short("BrewTime", 8);
+        old_stand.put_byte("Fuel", 3);
+
+        let mut new_stand = NbtCompound::new();
+        new_stand.put_string("id", "minecraft:brewing_stand".to_string());
+        new_stand.put_int("x", 4);
+        new_stand.put_int("y", 2);
+        new_stand.put_int("z", 3);
+        new_stand.put_int("BrewTime", 9);
+        new_stand.put_int("Fuel", 3);
+        new_stand.put_int("total_brew_time", 400);
+        new_stand.put_int("total_fuel", 20);
+        new_stand.put_float("speed_multiplier", 1.5);
+
+        let mut old_pot = NbtCompound::new();
+        old_pot.put_string("id", "minecraft:decorated_pot".to_string());
+        old_pot.put_int("x", 5);
+        old_pot.put_int("y", 2);
+        old_pot.put_int("z", 3);
+        old_pot.put_list(
+            "sherds",
+            vec![
+                NbtTag::String("minecraft:angler_pottery_sherd".into()),
+                NbtTag::String("minecraft:brick".into()),
+                NbtTag::String("minecraft:brick".into()),
+                NbtTag::String("minecraft:brick".into()),
+            ],
+        );
+
+        let mut back = NbtCompound::new();
+        back.put_string("id", "minecraft:angler_pottery_sherd".to_string());
+        let mut front = NbtCompound::new();
+        front.put_string("id", "minecraft:brick".to_string());
+        let mut sherds = NbtCompound::new();
+        sherds.put_compound("back", back);
+        sherds.put_compound("front", front);
+        let mut new_pot = NbtCompound::new();
+        new_pot.put_string("id", "minecraft:decorated_pot".to_string());
+        new_pot.put_int("x", 6);
+        new_pot.put_int("y", 2);
+        new_pot.put_int("z", 3);
+        new_pot.put_compound("sherds", sherds);
+
+        let mut sign = NbtCompound::new();
+        sign.put_string("id", "minecraft:sign".to_string());
+        sign.put_int("x", 7);
+        sign.put_int("y", 2);
+        sign.put_int("z", 3);
+        sign.put_byte("is_waxed", 0);
+
+        let chunk = ChunkData::empty(0, 0);
+        {
+            let mut entities = chunk
+                .pending_block_entities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for entity in [
+                old_furnace,
+                new_furnace,
+                old_stand,
+                new_stand,
+                old_pot,
+                new_pot,
+                sign,
+            ] {
+                let x = entity.get_int("x").expect("x");
+                let y = entity.get_int("y").expect("y");
+                let z = entity.get_int("z").expect("z");
+                entities.insert(BlockPos::new(x, y, z), entity);
+            }
+        }
+
+        let bytes = ChunkData::to_bytes(&chunk).expect("serialize chunk");
+        let loaded = ChunkData::from_bytes(&bytes, Vector2::new(0, 0)).expect("chunk reloads");
+        let saved = read_root(&ChunkData::to_bytes(&loaded).expect("serialize again"));
+
+        let old_furnace = find_block_entity(&saved, "minecraft:furnace", 1);
+        assert!(matches!(
+            old_furnace.get("cooking_time_spent"),
+            Some(NbtTag::Short(4))
+        ));
+        assert!(matches!(
+            old_furnace.get("cooking_total_time"),
+            Some(NbtTag::Short(200))
+        ));
+        assert!(matches!(
+            old_furnace.get("lit_time_remaining"),
+            Some(NbtTag::Short(5))
+        ));
+        assert!(matches!(
+            old_furnace.get("lit_total_time"),
+            Some(NbtTag::Short(1600))
+        ));
+        assert!(!old_furnace.has("speed_multiplier"));
+
+        let new_furnace = find_block_entity(&saved, "minecraft:furnace", 2);
+        assert!(matches!(
+            new_furnace.get("cooking_time_spent"),
+            Some(NbtTag::Int(6))
+        ));
+        assert!(matches!(
+            new_furnace.get("lit_total_time"),
+            Some(NbtTag::Int(1600))
+        ));
+        assert!(
+            matches!(new_furnace.get("speed_multiplier"), Some(NbtTag::Float(value)) if *value == 1.0)
+        );
+
+        let old_stand = find_block_entity(&saved, "minecraft:brewing_stand", 3);
+        assert!(matches!(old_stand.get("BrewTime"), Some(NbtTag::Short(8))));
+        assert!(matches!(old_stand.get("Fuel"), Some(NbtTag::Byte(3))));
+        assert!(!old_stand.has("total_brew_time"));
+        assert!(!old_stand.has("total_fuel"));
+        assert!(!old_stand.has("speed_multiplier"));
+
+        let new_stand = find_block_entity(&saved, "minecraft:brewing_stand", 4);
+        assert!(matches!(new_stand.get("BrewTime"), Some(NbtTag::Int(9))));
+        assert!(matches!(new_stand.get("Fuel"), Some(NbtTag::Int(3))));
+        assert!(matches!(
+            new_stand.get("total_brew_time"),
+            Some(NbtTag::Int(400))
+        ));
+        assert!(matches!(new_stand.get("total_fuel"), Some(NbtTag::Int(20))));
+        assert!(
+            matches!(new_stand.get("speed_multiplier"), Some(NbtTag::Float(value)) if *value == 1.5)
+        );
+
+        let old_pot = find_block_entity(&saved, "minecraft:decorated_pot", 5);
+        let sherds = old_pot.get_list("sherds").expect("4903 sherds list");
+        assert_eq!(sherds.len(), 4);
+        assert!(
+            matches!(&sherds[0], NbtTag::String(name) if name.as_ref() == "minecraft:angler_pottery_sherd")
+        );
+
+        let new_pot = find_block_entity(&saved, "minecraft:decorated_pot", 6);
+        let sherds = new_pot
+            .get_compound("sherds")
+            .expect("5023 sherds compound");
+        assert!(sherds.get_compound("left").is_none());
+        assert_eq!(
+            sherds
+                .get_compound("back")
+                .and_then(|stack| stack.get_string("id")),
+            Some("minecraft:angler_pottery_sherd")
+        );
+        assert_eq!(
+            sherds
+                .get_compound("front")
+                .and_then(|stack| stack.get_string("id")),
+            Some("minecraft:brick")
+        );
+
+        let sign = find_block_entity(&saved, "minecraft:sign", 7);
+        assert!(!sign.has("allow_op_features"));
+        assert!(matches!(sign.get("is_waxed"), Some(NbtTag::Byte(0))));
+
+        let mut pig = NbtCompound::new();
+        pig.put_string("id", "minecraft:pig".to_string());
+        pig.put_byte("Invulnerable", 1);
+        let mut timed = NbtCompound::new();
+        timed.put_string("id", "minecraft:pig".to_string());
+        timed.put_byte("Invulnerable", 0);
+        timed.put_int("invulnerable_time", 12);
+
+        let entities = ChunkEntityData {
+            x: 4,
+            z: 5,
+            data: std::sync::Mutex::new(vec![pig, timed]),
+            live: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
+        };
+        let bytes = ChunkEntityData::to_bytes(&entities).expect("serialize entities");
+        let loaded =
+            ChunkEntityData::from_bytes(&bytes, Vector2::new(4, 5)).expect("entities reload");
+        let saved =
+            read_root(&ChunkEntityData::to_bytes(&loaded).expect("serialize entities again"));
+        assert_eq!(saved.get_int("DataVersion"), Some(5023));
+        let list = saved.get_list("Entities").expect("entities");
+        assert!(matches!(
+            list[0]
+                .extract_compound()
+                .and_then(|pig| pig.get("Invulnerable")),
+            Some(NbtTag::Byte(1))
+        ));
+        assert!(
+            !list[0]
+                .extract_compound()
+                .expect("pig")
+                .has("invulnerable_time")
+        );
+        assert!(matches!(
+            list[1]
+                .extract_compound()
+                .and_then(|pig| pig.get("invulnerable_time")),
+            Some(NbtTag::Int(12))
+        ));
     }
 }
