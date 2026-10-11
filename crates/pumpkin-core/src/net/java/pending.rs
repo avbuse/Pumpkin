@@ -19,7 +19,8 @@ use pumpkin_protocol::{
         packet_encoder::TCPNetworkEncoder,
         server::config::{
             SAcceptCodeOfConduct, SAcknowledgeFinishConfig, SClientInformationConfig,
-            SConfigCookieResponse, SConfigPong, SConfigResourcePack, SKnownPacks, SPluginMessage,
+            SConfigCookieResponse, SConfigPong, SConfigResourcePack,
+            SKeepAlive as SConfigKeepAlive, SKnownPacks, SPluginMessage,
         },
     },
     packet::MultiVersionJavaPacket,
@@ -59,6 +60,52 @@ const BRAND_CHANNEL_PREFIX: &str = "minecraft:brand";
 /// server. The timer covers silence rather than the whole handshake: it is reset
 /// on every packet, so a slow but progressing login is never cut off.
 const HANDSHAKE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Serverbound configuration packet, by id.
+///
+/// `Unknown` is every id this phase does not dispatch. That still includes
+/// custom click; A-12 owns that packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigPacket {
+    ClientInformation,
+    PluginMessage,
+    AcknowledgeFinish,
+    KnownPacks,
+    ResourcePack,
+    CookieResponse,
+    Pong,
+    AcceptCodeOfConduct,
+    KeepAlive,
+    Unknown,
+}
+
+fn classify_config_packet(id: i32, version: JavaMinecraftVersion) -> ConfigPacket {
+    if id == SClientInformationConfig::to_id(version) {
+        ConfigPacket::ClientInformation
+    } else if id == SPluginMessage::to_id(version) {
+        ConfigPacket::PluginMessage
+    } else if id == SAcknowledgeFinishConfig::to_id(version) {
+        ConfigPacket::AcknowledgeFinish
+    } else if id == SKnownPacks::to_id(version) {
+        ConfigPacket::KnownPacks
+    } else if id == SConfigResourcePack::to_id(version) {
+        ConfigPacket::ResourcePack
+    } else if id == SConfigCookieResponse::to_id(version) {
+        ConfigPacket::CookieResponse
+    } else if id == SConfigPong::to_id(version) {
+        ConfigPacket::Pong
+    } else if id == SAcceptCodeOfConduct::to_id(version) {
+        ConfigPacket::AcceptCodeOfConduct
+    } else if id == SConfigKeepAlive::to_id(version) {
+        ConfigPacket::KeepAlive
+    } else {
+        ConfigPacket::Unknown
+    }
+}
+
+fn unknown_config_packet(id: i32) -> ReadingError {
+    ReadingError::Message(format!("Failed to handle packet id {id} in Config State"))
+}
 
 pub struct PendingConnection {
     pub id: u64,
@@ -497,8 +544,8 @@ impl PendingConnection {
         let mut payload = &packet.payload[..];
         let version = CURRENT_MC_VERSION;
 
-        match packet.id {
-            id if id == SClientInformationConfig::to_id(version) => {
+        match classify_config_packet(packet.id, version) {
+            ConfigPacket::ClientInformation => {
                 self.handle_client_information_config(SClientInformationConfig::read(
                     &mut payload,
                     &version,
@@ -506,12 +553,12 @@ impl PendingConnection {
                 .await;
                 Ok(None)
             }
-            id if id == SPluginMessage::to_id(version) => {
+            ConfigPacket::PluginMessage => {
                 self.handle_plugin_message(SPluginMessage::read(&mut payload, &version)?)
                     .await;
                 Ok(None)
             }
-            id if id == SAcknowledgeFinishConfig::to_id(version) => {
+            ConfigPacket::AcknowledgeFinish => {
                 let Some(profile) = self.gameprofile.clone() else {
                     return Ok(Some(PacketHandlerResult::Stop));
                 };
@@ -524,11 +571,11 @@ impl PendingConnection {
                     Ok(Some(PacketHandlerResult::ReadyToPlay(profile, config)))
                 }
             }
-            id if id == SKnownPacks::to_id(version) => {
+            ConfigPacket::KnownPacks => {
                 self.handle_known_packs(server).await;
                 Ok(None)
             }
-            id if id == SConfigResourcePack::to_id(version) => {
+            ConfigPacket::ResourcePack => {
                 self.handle_resource_pack_response(
                     server,
                     SConfigResourcePack::read(&mut payload, &version)?,
@@ -536,26 +583,42 @@ impl PendingConnection {
                 .await;
                 Ok(None)
             }
-            id if id == SConfigCookieResponse::to_id(version) => {
+            ConfigPacket::CookieResponse => {
                 self.handle_config_cookie_response(&SConfigCookieResponse::read(
                     &mut payload,
                     &version,
                 )?);
                 Ok(None)
             }
-            id if id == SConfigPong::to_id(version) => {
+            ConfigPacket::Pong => {
                 let _pong = SConfigPong::read(&mut payload, &version)?;
                 Ok(None)
             }
-            id if id == SAcceptCodeOfConduct::to_id(version) => {
+            ConfigPacket::AcceptCodeOfConduct => {
                 let _accept = SAcceptCodeOfConduct::read(&mut payload, &version)?;
                 Ok(None)
             }
-            _ => Err(ReadingError::Message(format!(
-                "Failed to handle packet id {} in Config State",
-                packet.id
-            ))),
+            // Play answers this id in `JavaClient::handle_keep_alive` and does not
+            // kick. There is no player yet, so there is no ping to store. The
+            // connection stays in configuration.
+            ConfigPacket::KeepAlive => {
+                self.handle_config_keep_alive(&SConfigKeepAlive::read(&mut payload, &version)?);
+                Ok(None)
+            }
+            ConfigPacket::Unknown => Err(unknown_config_packet(packet.id)),
         }
+    }
+
+    /// Serverbound keep-alive during configuration.
+    ///
+    /// Play matches an id the server sent and ignores any other id. Configuration
+    /// does not send a challenge. Either way the packet is consumed and the
+    /// client is not kicked.
+    pub fn handle_config_keep_alive(&self, keep_alive: &SConfigKeepAlive) {
+        debug!(
+            "Configuration keep alive {} from {}",
+            keep_alive.keep_alive_id, self.address
+        );
     }
 
     pub async fn handle_client_information_config(
@@ -653,5 +716,65 @@ impl PendingConnection {
             packet.key,
             packet.payload.as_ref().map(|p| p.len())
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_keep_alive_is_dispatched_and_unrelated_id_is_rejected() {
+        let version = CURRENT_MC_VERSION;
+        assert_eq!(
+            classify_config_packet(SConfigKeepAlive::to_id(version), version),
+            ConfigPacket::KeepAlive
+        );
+        assert_eq!(classify_config_packet(127, version), ConfigPacket::Unknown);
+        assert!(matches!(
+            unknown_config_packet(127),
+            ReadingError::Message(message) if message == "Failed to handle packet id 127 in Config State"
+        ));
+
+        for id in [
+            SClientInformationConfig::to_id(version),
+            SPluginMessage::to_id(version),
+            SAcknowledgeFinishConfig::to_id(version),
+            SKnownPacks::to_id(version),
+            SConfigResourcePack::to_id(version),
+            SConfigCookieResponse::to_id(version),
+            SConfigPong::to_id(version),
+            SAcceptCodeOfConduct::to_id(version),
+        ] {
+            assert_ne!(
+                classify_config_packet(id, version),
+                ConfigPacket::Unknown,
+                "configuration id {id} used to be dispatched"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_keep_alive_stays_in_configuration() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        let pending = PendingConnection::new(
+            server,
+            peer,
+            1,
+            crate::net::PacketRateLimiter::new(false, 1.0, 1.0),
+            std::sync::Weak::new(),
+        );
+        pending.connection_state.store(ConnectionState::Config);
+
+        pending.handle_config_keep_alive(&SConfigKeepAlive { keep_alive_id: 1 });
+
+        assert_eq!(pending.connection_state.load(), ConnectionState::Config);
+        assert!(!pending.close_token.is_cancelled());
+        drop(client);
     }
 }

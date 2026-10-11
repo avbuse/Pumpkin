@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use pumpkin_compat::{pumpkin_binary, run_milestone_diff, run_pumpkin_smoke};
+use pumpkin_compat::{
+    pumpkin_binary, run_config_packet_checks, run_milestone_diff, run_pumpkin_smoke,
+};
 
 #[tokio::test]
 #[ignore = "starts Pumpkin; the compat workflow runs this"]
@@ -11,6 +13,15 @@ async fn pumpkin_smoke() {
         .expect("login, spawn, chunk, place, and break");
     assert!(report.chunks > 0);
     assert!(report.status_json.contains("pumpkin-compat"));
+}
+
+#[tokio::test]
+#[ignore = "starts Pumpkin; the compat workflow runs this"]
+async fn config_packets() {
+    let binary = pumpkin_binary().expect("pumpkin binary");
+    run_config_packet_checks(&binary)
+        .await
+        .expect("configuration keep-alive reaches play and an unknown id is rejected");
 }
 
 #[tokio::test]

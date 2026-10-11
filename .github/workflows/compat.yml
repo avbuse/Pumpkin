@@ -38,6 +38,10 @@ jobs:
         env:
           PUMPKIN_BIN: ${{ github.workspace }}/target/debug/pumpkin
         run: cargo test -p pumpkin-compat --test smoke -- pumpkin_smoke --exact --ignored --test-threads=1
+      - name: Configuration keep-alive and unknown packet
+        env:
+          PUMPKIN_BIN: ${{ github.workspace }}/target/debug/pumpkin
+        run: cargo test -p pumpkin-compat --test smoke -- config_packets --exact --ignored --test-threads=1
 
   vanilla:
     name: Vanilla login milestones
