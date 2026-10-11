@@ -3294,8 +3294,12 @@ dependencies = [
 name = "pumpkin-gametest"
 version = "0.2.0+26.3-26.51"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "pumpkin-config",
+ "pumpkin-core",
  "pumpkin-data",
+ "pumpkin-inventory",
  "pumpkin-macros",
  "pumpkin-nbt",
  "pumpkin-util",
@@ -3303,6 +3307,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
