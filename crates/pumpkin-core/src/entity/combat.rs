@@ -10,13 +10,7 @@ use pumpkin_util::math::vector3::Vector3;
 use crate::{entity::Entity, world::World};
 
 /// Game ticks in one vanilla second. Attack cooldown is counted in ticks.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the cooldown tests use the vanilla 20 tick rate; the server passes its own tps"
-    )
-)]
+/// Vanilla multiplies by this literal, not by the server's configured tick rate.
 pub const ATTACK_STRENGTH_TICKS_PER_SECOND: f64 = 20.0;
 /// Added to the attack-strength ticker when a hit is resolved, so a click
 /// lands part-way through the current tick.
@@ -90,6 +84,17 @@ pub fn attack_strength_scale(
         return 1.0;
     }
     ((ticks_since_attack as f32 + adjust_ticks) / delay).clamp(0.0, 1.0)
+}
+
+/// Attack charge using vanilla's fixed 20 ticks per second.
+#[must_use]
+pub fn attack_cooldown_scale(ticks_since_attack: u32, adjust_ticks: f32, attack_speed: f64) -> f32 {
+    attack_strength_scale(
+        ticks_since_attack,
+        adjust_ticks,
+        attack_speed,
+        ATTACK_STRENGTH_TICKS_PER_SECOND,
+    )
 }
 
 /// `0.2 + scale² * 0.8`. A full charge returns 1.
@@ -216,16 +221,6 @@ pub fn sweep_damage(base_damage: f32, sweeping_ratio: f64) -> f32 {
     SWEEP_BASE_DAMAGE + (sweeping_ratio as f32) * base_damage
 }
 
-/// Sweeping Edge's attribute amount: `level / (level + 1)`.
-#[must_use]
-pub fn sweeping_edge_ratio(level: i32) -> f64 {
-    if level <= 0 {
-        return 0.0;
-    }
-    let level = f64::from(level);
-    level / (level + 1.0)
-}
-
 /// Enchantment bonus on a sweep is added to the sweep base, then multiplied
 /// by the attack strength scale.
 #[must_use]
@@ -241,11 +236,13 @@ pub fn sweep_hits_entity(
     primary_id: i32,
     other_id: i32,
     allied: bool,
+    marker_armor_stand: bool,
     distance_sq: f64,
 ) -> bool {
     other_id != attacker_id
         && other_id != primary_id
         && !allied
+        && !marker_armor_stand
         && distance_sq < SWEEP_REACH_DISTANCE_SQ
 }
 
@@ -940,11 +937,10 @@ mod tests {
         critical_allowed: bool,
         sprinting: bool,
     ) -> MeleeHit {
-        let scale = attack_strength_scale(
+        let scale = attack_cooldown_scale(
             ticks,
             ATTACK_STRENGTH_ADJUST_TICKS,
             wooden_sword_attack_speed(),
-            ATTACK_STRENGTH_TICKS_PER_SECOND,
         );
         resolve_melee_hit(&MeleeHitInput {
             attack_damage: WOODEN_SWORD_DAMAGE,
@@ -1055,11 +1051,10 @@ mod tests {
     #[test]
     fn strength_is_already_inside_attack_damage() {
         // Wooden sword 4 plus strength I (+3) is 7, not 7 plus another 3.
-        let scale = attack_strength_scale(
+        let scale = attack_cooldown_scale(
             13,
             ATTACK_STRENGTH_ADJUST_TICKS,
             wooden_sword_attack_speed(),
-            ATTACK_STRENGTH_TICKS_PER_SECOND,
         );
         let hit = resolve_melee_hit(&MeleeHitInput {
             attack_damage: 7.0,
@@ -1073,11 +1068,10 @@ mod tests {
     }
 
     #[test]
-    fn sweeping_edge_ratio_matches_the_enchantment_fraction() {
-        assert_eq!(sweeping_edge_ratio(0), 0.0);
-        assert_eq!(sweeping_edge_ratio(1), 0.5);
-        assert!((sweeping_edge_ratio(2) - 2.0 / 3.0).abs() < 1e-12);
-        assert_eq!(sweeping_edge_ratio(3), 0.75);
+    fn sweep_damage_uses_only_the_sweeping_damage_ratio_attribute() {
+        // The hit reads `sweeping_damage_ratio`. It does not add a level formula
+        // on top. 0 is an unenchanted sword. 0.5 and 0.75 are the attribute
+        // amounts Sweeping Edge writes at levels 1 and 3.
         assert_eq!(sweep_damage(4.0, 0.0), 1.0);
         assert_eq!(sweep_damage(4.0, 0.5), 3.0);
         assert_eq!(sweep_damage(4.0, 0.75), 4.0);
@@ -1120,11 +1114,17 @@ mod tests {
 
     #[test]
     fn sweep_does_not_hit_the_attacker() {
-        assert!(!sweep_hits_entity(1, 2, 1, false, 1.0));
-        assert!(!sweep_hits_entity(1, 2, 2, false, 1.0));
-        assert!(!sweep_hits_entity(1, 2, 3, true, 1.0));
-        assert!(!sweep_hits_entity(1, 2, 3, false, 9.0));
-        assert!(sweep_hits_entity(1, 2, 3, false, 8.9));
+        assert!(!sweep_hits_entity(1, 2, 1, false, false, 1.0));
+        assert!(!sweep_hits_entity(1, 2, 2, false, false, 1.0));
+        assert!(!sweep_hits_entity(1, 2, 3, true, false, 1.0));
+        assert!(!sweep_hits_entity(1, 2, 3, false, false, 9.0));
+        assert!(sweep_hits_entity(1, 2, 3, false, false, 8.9));
+    }
+
+    #[test]
+    fn sweep_skips_marker_armor_stands_and_hits_other_armor_stands() {
+        assert!(!sweep_hits_entity(1, 2, 3, false, true, 1.0));
+        assert!(sweep_hits_entity(1, 2, 3, false, false, 1.0));
     }
 
     #[test]
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn fist_full_charge_is_one_damage_after_five_ticks() {
-        let scale = attack_strength_scale(5, ATTACK_STRENGTH_ADJUST_TICKS, 4.0, 20.0);
+        let scale = attack_cooldown_scale(5, ATTACK_STRENGTH_ADJUST_TICKS, 4.0);
         assert_eq!(scale, 1.0);
         let hit = resolve_melee_hit(&MeleeHitInput {
             attack_damage: 1.0,
@@ -1193,6 +1193,28 @@ mod tests {
             sprinting: false,
         });
         assert_eq!(hit.total_damage, 1.0);
+    }
+
+    #[test]
+    fn attack_cooldown_stays_on_twenty_ticks_per_second() {
+        let speed = wooden_sword_attack_speed();
+        let vanilla = attack_cooldown_scale(13, ATTACK_STRENGTH_ADJUST_TICKS, speed);
+        assert_eq!(vanilla, 1.0);
+        // A server running at 40 ticks per second would stretch the delay if the
+        // cooldown used that rate. Vanilla keeps the literal 20.
+        let at_forty = attack_strength_scale(13, ATTACK_STRENGTH_ADJUST_TICKS, speed, 40.0);
+        assert!(at_forty < 1.0);
+        assert!(at_forty < vanilla);
+        let second = attack_cooldown_scale(0, ATTACK_STRENGTH_ADJUST_TICKS, speed);
+        let hit = resolve_melee_hit(&MeleeHitInput {
+            attack_damage: WOODEN_SWORD_DAMAGE,
+            attack_strength_scale: second,
+            enchantment_bonus: 0.0,
+            bonus_before_crit: 0.0,
+            critical_allowed: false,
+            sprinting: false,
+        });
+        assert!((hit.total_damage - 0.805_12).abs() < 1e-4);
     }
 
     #[test]

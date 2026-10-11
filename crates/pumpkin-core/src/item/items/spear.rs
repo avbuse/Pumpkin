@@ -78,8 +78,10 @@ impl ItemBehaviour for SpearItem {
             return;
         };
 
-        let tps = f64::from(server.basic_config.tps);
-        let attack_delay = tps / Self::attack_speed(player, stack);
+        let attack_delay = f64::from(crate::entity::combat::attack_strength_delay(
+            Self::attack_speed(player, stack),
+            crate::entity::combat::ATTACK_STRENGTH_TICKS_PER_SECOND,
+        ));
         let elapsed = f64::from(player.last_attacked_ticks.load(Ordering::Acquire));
         if elapsed + 5.0 < attack_delay {
             return;
@@ -163,10 +165,8 @@ impl SpearItem {
         let mut base_damage = base_damage;
         let mut magic_boost = Self::enchantment_damage(stack, target_entity) as f32;
         if !Self::is_using_hand(player, hand) {
-            let tps = f64::from(server.basic_config.tps);
             let charge =
-                player.get_attack_cooldown_progress(tps, 0.5, Self::attack_speed(player, stack))
-                    as f32;
+                player.get_attack_cooldown_progress(0.5, Self::attack_speed(player, stack)) as f32;
             magic_boost *= charge;
             base_damage *= charge.mul_add(charge * 0.8, 0.2);
         }

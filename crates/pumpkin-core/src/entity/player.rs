@@ -316,6 +316,7 @@ use bytes::Bytes;
 
 use super::breath::BreathManager;
 use super::combat::{self, AttackType, player_attack_sound};
+use super::decoration::armor_stand::ArmorStandEntity;
 use super::hunger::HungerManager;
 use super::item::ItemEntity;
 use super::living::LivingEntity;
@@ -1356,7 +1357,6 @@ impl Player {
             1.0
         } else {
             self.get_attack_cooldown_progress(
-                f64::from(server.basic_config.tps),
                 f64::from(combat::ATTACK_STRENGTH_ADJUST_TICKS),
                 attack_speed,
             ) as f32
@@ -1591,30 +1591,11 @@ impl Player {
             })
     }
 
-    fn sweeping_damage_ratio(&self, stack: &ItemStack) -> f64 {
-        const SWEEPING_EDGE_MODIFIER_ID: &str = "minecraft:enchantment.sweeping_edge";
-        let ratio = self
-            .living_entity
-            .get_attribute_value(&Attributes::SWEEPING_DAMAGE_RATIO);
-        if self.attribute_has_modifier(
-            &Attributes::SWEEPING_DAMAGE_RATIO,
-            SWEEPING_EDGE_MODIFIER_ID,
-        ) {
-            return ratio;
-        }
-        ratio + combat::sweeping_edge_ratio(Self::sweeping_edge_level(stack))
-    }
-
-    fn sweeping_edge_level(stack: &ItemStack) -> i32 {
-        let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() else {
-            return 0;
-        };
-        for (enchantment, level) in enchantments.enchantment.iter() {
-            if **enchantment == Enchantment::SWEEPING_EDGE {
-                return *level;
-            }
-        }
-        0
+    /// Sweep bonus from the sweeping-damage-ratio attribute. Sweeping Edge
+    /// writes that attribute; the hit does not recompute the enchantment level.
+    fn sweeping_damage_ratio(&self) -> f64 {
+        self.living_entity
+            .get_attribute_value(&Attributes::SWEEPING_DAMAGE_RATIO)
     }
 
     fn melee_enchantment_bonus(stack: &ItemStack, victim_type: &EntityType) -> f32 {
@@ -1675,7 +1656,7 @@ impl Player {
         let world = self.world();
         let attacker_entity = &self.living_entity.entity;
         let primary_entity = primary.get_entity();
-        let sweep_base = combat::sweep_damage(base_damage, self.sweeping_damage_ratio(stack));
+        let sweep_base = combat::sweep_damage(base_damage, self.sweeping_damage_ratio());
         let search_box = primary_entity.bounding_box.load().expand(1.0, 0.25, 1.0);
         for other in world.get_all_at_box(&search_box) {
             let Some(other_living) = other.get_living_entity() else {
@@ -1687,11 +1668,16 @@ impl Player {
                 .load()
                 .squared_distance_to_vec(&other_entity.pos.load());
             let allied = (self as &dyn EntityBase).is_allied_to(other.as_ref());
+            let marker_armor_stand = other
+                .cast_any()
+                .downcast_ref::<ArmorStandEntity>()
+                .is_some_and(ArmorStandEntity::is_marker);
             if !combat::sweep_hits_entity(
                 attacker_entity.entity_id,
                 primary_entity.entity_id,
                 other_entity.entity_id,
                 allied,
+                marker_armor_stand,
                 distance_sq,
             ) {
                 continue;
@@ -3296,12 +3282,13 @@ impl Player {
         self.client_loaded.store(loaded, Ordering::Relaxed);
     }
 
-    pub fn get_attack_cooldown_progress(&self, tps: f64, base_time: f64, attack_speed: f64) -> f64 {
-        f64::from(combat::attack_strength_scale(
+    /// Charge of the attack cooldown. The delay is always vanilla's 20 ticks
+    /// per second, including when the server tick rate is changed.
+    pub fn get_attack_cooldown_progress(&self, base_time: f64, attack_speed: f64) -> f64 {
+        f64::from(combat::attack_cooldown_scale(
             self.last_attacked_ticks.load(Ordering::Acquire),
             base_time as f32,
             attack_speed,
-            tps,
         ))
     }
 
