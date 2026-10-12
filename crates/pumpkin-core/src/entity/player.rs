@@ -1,4 +1,5 @@
 pub mod advancement;
+mod saved_nbt;
 pub mod statistics;
 
 use core::f32;
@@ -735,7 +736,6 @@ impl Player {
             client,
             awaiting_teleport: Mutex::new(None),
             breath_manager: BreathManager::default(),
-            // TODO: Load this from previous instance
             hunger_manager: HungerManager::default(),
             current_block_destroy_stage: AtomicI32::new(-1),
             current_block_breaking_speed: AtomicU32::new(0),
@@ -1867,6 +1867,7 @@ impl Player {
             dimension,
             position: final_block_pos,
             yaw,
+            pitch,
             force: forced,
         });
         true
@@ -1946,7 +1947,7 @@ impl Player {
                 return Some(CalculatedRespawnPoint {
                     position,
                     yaw: respawn_point.yaw,
-                    pitch: 0.0,
+                    pitch: respawn_point.pitch,
                     dimension: respawn_point.dimension.clone(),
                 });
             }
@@ -1964,7 +1965,7 @@ impl Player {
                 return Some(CalculatedRespawnPoint {
                     position: spawn_pos,
                     yaw: respawn_point.yaw,
-                    pitch: 0.0,
+                    pitch: respawn_point.pitch,
                     dimension: respawn_point.dimension.clone(),
                 });
             }
@@ -1996,7 +1997,7 @@ impl Player {
                 return Some(CalculatedRespawnPoint {
                     position: spawn_pos,
                     yaw: respawn_point.yaw,
-                    pitch: 0.0,
+                    pitch: respawn_point.pitch,
                     dimension: respawn_point.dimension.clone(),
                 });
             }
@@ -6709,8 +6710,12 @@ impl NBTStorage for PlayerInventory {
     }
 
     fn read_nbt_non_mut(&self, nbt: &NbtCompound) {
-        // Read selected hotbar slot
-        self.set_selected_slot(nbt.get_int("SelectedItemSlot").unwrap_or(0) as u8);
+        let selected = nbt
+            .get_int("SelectedItemSlot")
+            .or_else(|| nbt.get_byte("SelectedItemSlot").map(i32::from))
+            .or_else(|| nbt.get_short("SelectedItemSlot").map(i32::from))
+            .unwrap_or(0);
+        self.set_selected_slot(selected.clamp(0, i32::from(u8::MAX)) as u8);
         // Process inventory list
         let set_stack_sync = |slot: usize, stack: ItemStack| {
             if slot < Self::MAIN_SIZE {
@@ -6729,57 +6734,95 @@ impl NBTStorage for PlayerInventory {
 
         if let Some(inventory_list) = nbt.get_list("Inventory") {
             for tag in inventory_list {
-                if let Some(item_compound) = tag.extract_compound()
-                    && let Some(slot_byte) = item_compound.get_byte("Slot")
-                {
-                    let slot = match slot_byte {
-                        100 => 36,  // feet
-                        101 => 37,  // legs
-                        102 => 38,  // chest
-                        103 => 39,  // head
-                        -106 => 40, // offhand
-                        s if (0..=40).contains(&s) => s as usize,
-                        _ => continue,
-                    };
-                    if let Some(item_stack) = ItemStack::read_item_stack(item_compound) {
-                        set_stack_sync(slot, item_stack);
-                    }
+                let Some(item_compound) = tag.extract_compound() else {
+                    continue;
+                };
+                let Some(slot) = saved_item_slot(item_compound).and_then(inventory_slot_index)
+                else {
+                    continue;
+                };
+                if let Some(item_stack) = read_saved_item_stack(item_compound) {
+                    set_stack_sync(slot, item_stack);
                 }
             }
         }
 
         if let Some(equipment) = nbt.get_compound("equipment") {
             if let Some(offhand) = equipment.get_compound("offhand")
-                && let Some(item_stack) = ItemStack::read_item_stack(offhand)
+                && let Some(item_stack) = read_saved_item_stack(offhand)
             {
                 set_stack_sync(40, item_stack);
             }
 
             if let Some(head) = equipment.get_compound("head")
-                && let Some(item_stack) = ItemStack::read_item_stack(head)
+                && let Some(item_stack) = read_saved_item_stack(head)
             {
                 set_stack_sync(39, item_stack);
             }
 
             if let Some(chest) = equipment.get_compound("chest")
-                && let Some(item_stack) = ItemStack::read_item_stack(chest)
+                && let Some(item_stack) = read_saved_item_stack(chest)
             {
                 set_stack_sync(38, item_stack);
             }
 
             if let Some(legs) = equipment.get_compound("legs")
-                && let Some(item_stack) = ItemStack::read_item_stack(legs)
+                && let Some(item_stack) = read_saved_item_stack(legs)
             {
                 set_stack_sync(37, item_stack);
             }
 
             if let Some(feet) = equipment.get_compound("feet")
-                && let Some(item_stack) = ItemStack::read_item_stack(feet)
+                && let Some(item_stack) = read_saved_item_stack(feet)
             {
                 set_stack_sync(36, item_stack);
             }
         }
     }
+}
+
+fn saved_item_slot(compound: &NbtCompound) -> Option<i32> {
+    compound
+        .get_byte("Slot")
+        .map(i32::from)
+        .or_else(|| compound.get_short("Slot").map(i32::from))
+        .or_else(|| compound.get_int("Slot"))
+}
+
+const fn inventory_slot_index(slot: i32) -> Option<usize> {
+    match slot {
+        100 => Some(36),
+        101 => Some(37),
+        102 => Some(38),
+        103 => Some(39),
+        -106 => Some(40),
+        0..=40 => Some(slot as usize),
+        _ => None,
+    }
+}
+
+/// `count` is an int in current files. A missing count is one item, and a byte
+/// or short count is still that stack rather than a dropped slot.
+fn read_saved_item_stack(compound: &NbtCompound) -> Option<ItemStack> {
+    if compound.get_int("count").is_some() {
+        return ItemStack::read_item_stack(compound);
+    }
+    let count = compound
+        .get_byte("count")
+        .map(i32::from)
+        .or_else(|| compound.get_short("count").map(i32::from))
+        .or_else(|| {
+            compound
+                .get_numeric_float("count")
+                .map(|value| value as i32)
+        })
+        .unwrap_or(1);
+    if count <= 0 {
+        return None;
+    }
+    let mut compound = compound.clone();
+    compound.put_int("count", count.clamp(1, i32::from(u8::MAX)));
+    ItemStack::read_item_stack(&compound)
 }
 
 impl NBTStorageInit for PlayerInventory {}
@@ -6978,10 +7021,7 @@ impl EntityBase for Player {
         nbt.put_int("Score", self.score.load(Ordering::Relaxed));
         nbt.put_short("SleepTimer", self.sleeping_since.load().unwrap_or(0) as i16);
 
-        nbt.put_int("playerGameType", self.gamemode.load() as i32);
-        if let Some(previous_gamemode) = self.previous_gamemode.load() {
-            nbt.put_int("previousPlayerGameType", previous_gamemode as i32);
-        }
+        saved_nbt::write_player_gamemode(nbt, self.gamemode.load(), self.previous_gamemode.load());
 
         nbt.put_bool("seenCredits", self.seen_credits.load(Ordering::Relaxed));
         nbt.put_compound(
@@ -7000,6 +7040,7 @@ impl EntityBase for Player {
             self.has_played_before.load(Ordering::Relaxed),
         );
 
+        saved_nbt::write_player_health(nbt, self.living_entity.health.load());
         // Store food level, saturation, exhaustion, and tick timer
         self.hunger_manager.write_nbt(nbt);
 
@@ -7023,35 +7064,13 @@ impl EntityBase for Player {
             self.world().dimension.minecraft_name.to_string(),
         );
 
-        if let Some(respawn) = self
-            .respawn_point
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            nbt.put_int("SpawnX", respawn.position.0.x);
-            nbt.put_int("SpawnY", respawn.position.0.y);
-            nbt.put_int("SpawnZ", respawn.position.0.z);
-            nbt.put_string(
-                "SpawnDimension",
-                respawn.dimension.minecraft_name.to_owned(),
-            );
-            nbt.put_bool("SpawnForced", respawn.force);
-
-            let mut respawn_compound = NbtCompound::new();
-            respawn_compound.put_string("dimension", respawn.dimension.minecraft_name.to_string());
-            respawn_compound.put(
-                "pos",
-                NbtTag::IntArray(vec![
-                    respawn.position.0.x,
-                    respawn.position.0.y,
-                    respawn.position.0.z,
-                ]),
-            );
-            respawn_compound.put_float("angle", respawn.yaw);
-            respawn_compound.put_bool("forced", respawn.force);
-            nbt.put_compound("respawn", respawn_compound);
-        }
+        saved_nbt::write_spawn_point(
+            nbt,
+            self.respawn_point
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref(),
+        );
 
         let vehicle_uuid = self
             .living_entity
@@ -7125,19 +7144,10 @@ impl EntityBase for Player {
             Ordering::Relaxed,
         );
 
-        let gamemode = nbt
-            .get_int("playerGameType")
-            .or_else(|| nbt.get_byte("playerGameType").map(i32::from))
-            .and_then(|val| GameMode::try_from(val).ok())
-            .unwrap_or_else(|| self.gamemode.load());
-
+        let (gamemode, previous_gamemode) =
+            saved_nbt::read_player_gamemode(nbt, self.gamemode.load());
         self.gamemode.store(gamemode);
-
-        self.previous_gamemode.store(
-            nbt.get_int("previousPlayerGameType")
-                .or_else(|| nbt.get_byte("previousPlayerGameType").map(i32::from))
-                .and_then(|val| GameMode::try_from(val).ok()),
-        );
+        self.previous_gamemode.store(previous_gamemode);
 
         {
             let mut abilities = self
@@ -7177,6 +7187,9 @@ impl EntityBase for Player {
             Ordering::Relaxed,
         );
 
+        if let Some(health) = saved_nbt::read_player_health(nbt) {
+            self.living_entity.set_health(health);
+        }
         self.hunger_manager.read_nbt_non_mut(nbt);
 
         if let Some(air) = nbt
@@ -7195,50 +7208,11 @@ impl EntityBase for Player {
             );
         }
 
-        // Load any saved spawnpoint data (both vanilla "respawn" compound and legacy SpawnX/SpawnY/SpawnZ)
-        if let Some(respawn_compound) = nbt.get_compound("respawn") {
-            let dim = respawn_compound
-                .get_string("dimension")
-                .and_then(|s| Dimension::from_name(s).cloned())
-                .unwrap_or_else(|| self.world().dimension.clone());
-            let pos = if let Some(pos_array) = respawn_compound.get_int_array("pos")
-                && pos_array.len() >= 3
-            {
-                BlockPos(Vector3::new(pos_array[0], pos_array[1], pos_array[2]))
-            } else {
-                BlockPos(Vector3::new(0, 0, 0))
-            };
-            let yaw = respawn_compound.get_float("angle").unwrap_or(0.0);
-            let force = respawn_compound.get_bool("forced").unwrap_or(false);
-            *self
-                .respawn_point
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RespawnPoint {
-                dimension: dim,
-                position: pos,
-                yaw,
-                force,
-            });
-        } else if let (Some(x), Some(y), Some(z)) = (
-            nbt.get_int("SpawnX"),
-            nbt.get_int("SpawnY"),
-            nbt.get_int("SpawnZ"),
-        ) {
-            let dim = nbt
-                .get_string("SpawnDimension")
-                .and_then(|s| Dimension::from_name(s).cloned())
-                .unwrap_or_else(|| self.world().dimension.clone());
-            let force = nbt.get_bool("SpawnForced").unwrap_or(false);
-            *self
-                .respawn_point
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RespawnPoint {
-                dimension: dim,
-                position: BlockPos(Vector3::new(x, y, z)),
-                yaw: 0.0,
-                force,
-            });
-        }
+        *self
+            .respawn_point
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            saved_nbt::read_spawn_point(nbt, &self.world().dimension);
         self.root_vehicle_uuid.store(read_root_vehicle(nbt));
         self.stats
             .lock()
@@ -7372,6 +7346,7 @@ pub struct RespawnPoint {
     pub dimension: Dimension,
     pub position: BlockPos,
     pub yaw: f32,
+    pub pitch: f32,
     pub force: bool,
 }
 
@@ -8159,5 +8134,160 @@ mod tests {
             });
         }
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines)]
+    fn inventory_and_ender_chest_round_trip_on_one_compound() {
+        use std::sync::{Arc, Mutex};
+
+        use pumpkin_data::data_component_impl::EquipmentSlot;
+        use pumpkin_data::dimension::Dimension;
+        use pumpkin_data::item::Item;
+        use pumpkin_data::item_stack::ItemStack;
+        use pumpkin_inventory::entity_equipment::EntityEquipment;
+        use pumpkin_util::GameMode;
+
+        use super::saved_nbt::{
+            read_player_gamemode, read_player_health, read_spawn_point, write_player_gamemode,
+            write_player_health, write_spawn_point,
+        };
+        use super::{EnderChestInventory, PlayerInventory, RespawnPoint};
+        use crate::entity::NBTStorage;
+        use crate::entity::hunger::HungerManager;
+
+        fn stack(item: &'static Item, count: u8) -> ItemStack {
+            ItemStack::new(count, item)
+        }
+
+        fn assert_stack(actual: &ItemStack, item: &'static Item, count: u8) {
+            assert_eq!(actual.item.registry_key, item.registry_key);
+            assert_eq!(actual.item_count, count);
+        }
+
+        let inventory = PlayerInventory::new(
+            Arc::new(Mutex::new(EntityEquipment::new())),
+            Arc::new(pumpkin_inventory::build_equipment_slots()),
+        );
+        inventory.set_selected_slot(4);
+        let mut main = inventory
+            .main_inventory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        main[0] = stack(&Item::DIAMOND, 3);
+        main[20] = stack(&Item::BREAD, 1);
+        drop(main);
+        inventory
+            .entity_equipment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .put(&EquipmentSlot::HEAD, stack(&Item::IRON_HELMET, 1));
+        inventory
+            .entity_equipment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .put(&EquipmentSlot::OFF_HAND, stack(&Item::SHIELD, 1));
+
+        let ender = EnderChestInventory::new();
+        ender
+            .items
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[2] = stack(&Item::EMERALD, 1);
+
+        let hunger = HungerManager::default();
+        hunger.set_level(6);
+        hunger.set_saturation(1.5);
+
+        let spawn = RespawnPoint {
+            dimension: Dimension::OVERWORLD.clone(),
+            position: pumpkin_util::math::position::BlockPos(
+                pumpkin_util::math::vector3::Vector3::new(12, 80, -4),
+            ),
+            yaw: 180.0,
+            pitch: -10.0,
+            force: true,
+        };
+
+        let mut nbt = pumpkin_nbt::compound::NbtCompound::new();
+        inventory.write_nbt(&mut nbt);
+        ender.write_nbt(&mut nbt);
+        write_player_health(&mut nbt, 13.0);
+        hunger.write_nbt(&mut nbt);
+        write_player_gamemode(&mut nbt, GameMode::Adventure, Some(GameMode::Creative));
+        write_spawn_point(&mut nbt, Some(&spawn));
+
+        let loaded = PlayerInventory::new(
+            Arc::new(Mutex::new(EntityEquipment::new())),
+            Arc::new(pumpkin_inventory::build_equipment_slots()),
+        );
+        loaded.read_nbt_non_mut(&nbt);
+        assert_eq!(loaded.get_selected_slot(), 4);
+        let main = loaded
+            .main_inventory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_stack(&main[0], &Item::DIAMOND, 3);
+        assert_stack(&main[20], &Item::BREAD, 1);
+        assert!(main[1].is_empty());
+        drop(main);
+        let equipment = loaded
+            .entity_equipment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_stack(&equipment.get(&EquipmentSlot::HEAD), &Item::IRON_HELMET, 1);
+        assert_stack(&equipment.get(&EquipmentSlot::OFF_HAND), &Item::SHIELD, 1);
+        drop(equipment);
+
+        let loaded_ender = EnderChestInventory::new();
+        loaded_ender.read_nbt_non_mut(&nbt);
+        assert_stack(
+            &loaded_ender
+                .items
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[2],
+            &Item::EMERALD,
+            1,
+        );
+
+        let loaded_hunger = HungerManager::default();
+        loaded_hunger.read_nbt_non_mut(&nbt);
+        assert_eq!(loaded_hunger.level.load(), 6);
+        assert_eq!(loaded_hunger.saturation.load(), 1.5);
+        assert_eq!(read_player_health(&nbt), Some(13.0));
+        assert_eq!(
+            read_player_gamemode(&nbt, GameMode::Survival),
+            (GameMode::Adventure, Some(GameMode::Creative))
+        );
+        assert_eq!(read_spawn_point(&nbt, &Dimension::OVERWORLD), Some(spawn));
+    }
+
+    #[test]
+    fn inventory_loads_int_slot_and_byte_count() {
+        use std::sync::{Arc, Mutex};
+
+        use pumpkin_data::item::Item;
+        use pumpkin_inventory::entity_equipment::EntityEquipment;
+        use pumpkin_nbt::tag::NbtTag;
+
+        use super::PlayerInventory;
+        use crate::entity::NBTStorage;
+
+        let mut odd = pumpkin_nbt::compound::NbtCompound::new();
+        let mut entry = pumpkin_nbt::compound::NbtCompound::new();
+        entry.put_int("Slot", 11);
+        entry.put_string("id", "minecraft:stick".to_string());
+        entry.put_byte("count", 2);
+        odd.put("Inventory", NbtTag::List(vec![NbtTag::Compound(entry)]));
+        let from_odd = PlayerInventory::new(
+            Arc::new(Mutex::new(EntityEquipment::new())),
+            Arc::new(pumpkin_inventory::build_equipment_slots()),
+        );
+        from_odd.read_nbt_non_mut(&odd);
+        let loaded = from_odd
+            .main_inventory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(loaded[11].item.registry_key, Item::STICK.registry_key);
+        assert_eq!(loaded[11].item_count, 2);
     }
 }

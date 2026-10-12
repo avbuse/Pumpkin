@@ -170,15 +170,83 @@ impl NBTStorage for HungerManager {
     }
 
     fn read_nbt_non_mut(&self, nbt: &NbtCompound) {
-        self.level
-            .store(nbt.get_int("foodLevel").unwrap_or(20) as u8);
-        self.saturation
-            .store(nbt.get_float("foodSaturationLevel").unwrap_or(5.0));
-        self.exhaustion
-            .store(nbt.get_float("foodExhaustionLevel").unwrap_or(0.0));
-        self.tick_timer
-            .store(nbt.get_int("foodTickTimer").unwrap_or(0) as u32);
+        // Absent keys keep the fresh-player defaults. A present zero must not
+        // fall through to those defaults, and a byte or short must not be skipped.
+        if let Some(level) = read_food_level(nbt) {
+            self.level.store(level);
+        }
+        if let Some(saturation) = nbt.get_numeric_float("foodSaturationLevel") {
+            self.saturation.store(saturation);
+        }
+        if let Some(exhaustion) = nbt.get_numeric_float("foodExhaustionLevel") {
+            self.exhaustion.store(exhaustion);
+        }
+        if let Some(timer) = read_food_tick_timer(nbt) {
+            self.tick_timer.store(timer);
+        }
     }
 }
 
+fn read_food_level(nbt: &NbtCompound) -> Option<u8> {
+    let raw = nbt
+        .get_int("foodLevel")
+        .or_else(|| nbt.get_byte("foodLevel").map(i32::from))
+        .or_else(|| nbt.get_short("foodLevel").map(i32::from))
+        .or_else(|| nbt.get_numeric_float("foodLevel").map(|value| value as i32))?;
+    Some(raw.clamp(0, i32::from(MAX_FOOD)) as u8)
+}
+
+fn read_food_tick_timer(nbt: &NbtCompound) -> Option<u32> {
+    let raw = nbt
+        .get_int("foodTickTimer")
+        .or_else(|| nbt.get_short("foodTickTimer").map(i32::from))
+        .or_else(|| nbt.get_byte("foodTickTimer").map(i32::from))?;
+    Some(raw.max(0) as u32)
+}
+
 impl NBTStorageInit for HungerManager {}
+
+#[cfg(test)]
+mod tests {
+    use super::HungerManager;
+    use crate::entity::NBTStorage;
+    use pumpkin_nbt::compound::NbtCompound;
+
+    #[test]
+    fn hunger_round_trips_including_an_empty_bar() {
+        let hunger = HungerManager::default();
+        hunger.level.store(0);
+        hunger.saturation.store(0.0);
+        hunger.exhaustion.store(2.5);
+        hunger.tick_timer.store(40);
+
+        let mut nbt = NbtCompound::new();
+        hunger.write_nbt(&mut nbt);
+        assert_eq!(nbt.get_int("foodLevel"), Some(0));
+
+        let loaded = HungerManager::default();
+        loaded.read_nbt_non_mut(&nbt);
+        assert_eq!(loaded.level.load(), 0);
+        assert_eq!(loaded.saturation.load(), 0.0);
+        assert_eq!(loaded.exhaustion.load(), 2.5);
+        assert_eq!(loaded.tick_timer.load(), 40);
+    }
+
+    #[test]
+    fn partial_hunger_keeps_new_player_defaults() {
+        let hunger = HungerManager::default();
+        hunger.read_nbt_non_mut(&NbtCompound::new());
+        assert_eq!(hunger.level.load(), 20);
+        assert_eq!(hunger.saturation.load(), 5.0);
+        assert_eq!(hunger.exhaustion.load(), 0.0);
+        assert_eq!(hunger.tick_timer.load(), 0);
+
+        let mut byte_level = NbtCompound::new();
+        byte_level.put_byte("foodLevel", 4);
+        byte_level.put_float("foodSaturationLevel", 0.0);
+        hunger.read_nbt_non_mut(&byte_level);
+        assert_eq!(hunger.level.load(), 4);
+        assert_eq!(hunger.saturation.load(), 0.0);
+        assert_eq!(hunger.exhaustion.load(), 0.0);
+    }
+}
