@@ -32,6 +32,7 @@ macro_rules! impl_block_entity_for_chest {
                     viewers: $crate::block::viewer::ViewerCountTracker::new(),
                     loot_table: StdMutex::new(loot_table_key),
                     loot_table_seed,
+                    bound_world: StdMutex::new(std::sync::Weak::new()),
                 };
 
                 // Only read saved items when there is no pending loot table.
@@ -76,13 +77,25 @@ macro_rules! impl_block_entity_for_chest {
                 }
             }
 
+            fn bind_world(&self, world: &Arc<$crate::world::World>) {
+                *self
+                    .bound_world
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    std::sync::Arc::downgrade(world);
+            }
+
             fn tick(&self, world: &Arc<$crate::world::World>) {
+                self.bind_world(world);
                 $crate::block::viewer::ViewerCountTrackerExt::update_viewer_count::<$struct_name>(
                     &self.viewers,
                     self,
                     world,
                     &self.position,
                 );
+                if self.is_dirty() {
+                    $crate::block::entities::persist_container(self, world);
+                }
             }
 
             fn get_inventory(self: Arc<Self>) -> Option<Arc<dyn pumpkin_inventory::Inventory>> {
@@ -171,24 +184,28 @@ macro_rules! impl_inventory_for_chest {
             }
 
             fn remove_stack(&self, slot: usize) -> ItemStack {
-                let mut items = self
-                    .items
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let removed = std::mem::replace(&mut items[slot], ItemStack::EMPTY.clone());
+                let removed = {
+                    let mut items = self
+                        .items
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    std::mem::replace(&mut items[slot], ItemStack::EMPTY.clone())
+                };
                 self.mark_dirty();
                 removed
             }
 
             fn remove_stack_specific(&self, slot: usize, amount: u8) -> ItemStack {
-                let mut items = self
-                    .items
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let res = if !items[slot].is_empty() && amount > 0 {
-                    items[slot].split(amount)
-                } else {
-                    ItemStack::EMPTY.clone()
+                let res = {
+                    let mut items = self
+                        .items
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !items[slot].is_empty() && amount > 0 {
+                        items[slot].split(amount)
+                    } else {
+                        ItemStack::EMPTY.clone()
+                    }
                 };
                 self.mark_dirty();
                 res
@@ -200,6 +217,7 @@ macro_rules! impl_inventory_for_chest {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 items[slot] = stack;
+                drop(items);
                 self.mark_dirty();
             }
 
@@ -215,6 +233,14 @@ macro_rules! impl_inventory_for_chest {
                 self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 self.comparator_dirty
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                let world = self
+                    .bound_world
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .upgrade();
+                if let Some(world) = world {
+                    $crate::block::entities::persist_container(self, &world);
+                }
             }
 
             fn as_any(&self) -> &dyn std::any::Any {
@@ -235,6 +261,7 @@ macro_rules! impl_clearable_for_chest {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 items.fill_with(|| ItemStack::EMPTY.clone());
+                drop(items);
                 <$struct_name as pumpkin_inventory::Inventory>::mark_dirty(self);
             }
         }
@@ -319,6 +346,7 @@ macro_rules! impl_chest_helper_methods {
                     viewers: $crate::block::viewer::ViewerCountTracker::new(),
                     loot_table: StdMutex::new(None),
                     loot_table_seed: 0,
+                    bound_world: StdMutex::new(std::sync::Weak::new()),
                 }
             }
 

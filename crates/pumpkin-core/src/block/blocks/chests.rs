@@ -93,6 +93,7 @@ fn placed_chest_impl<E: BlockEntity + 'static>(
     create_entity: impl FnOnce(BlockPos) -> E,
 ) {
     let chest = create_entity(*args.position);
+    chest.bind_world(args.world);
     args.world.add_block_entity(Arc::new(chest));
 
     let chest_props = ChestLikeProperties::from_state_id(args.state_id);
@@ -195,8 +196,11 @@ fn get_chest_screen_handler_factory(
     };
 
     // Unpack deferred loot table on first open (non-spectator only).
-    if !player_is_spectator && let Some(ref entity) = first_chest {
-        unpack(entity);
+    if let Some(ref entity) = first_chest {
+        entity.bind_world(args.world);
+        if !player_is_spectator {
+            unpack(entity);
+        }
     }
 
     let first_inventory = first_chest.and_then(BlockEntity::get_inventory)?;
@@ -213,13 +217,15 @@ fn get_chest_screen_handler_factory(
     }
 
     // Both halves of a double chest are unpacked at once, like vanilla's CompoundContainer.
-    if !player_is_spectator
-        && let Some(direction) = connected_towards
+    if let Some(direction) = connected_towards
         && let Some(second) = args
             .world
             .get_block_entity(&args.position.offset(direction.to_offset()))
     {
-        unpack(&second);
+        second.bind_world(args.world);
+        if !player_is_spectator {
+            unpack(&second);
+        }
     }
 
     let inventory = if let Some(direction) = connected_towards
@@ -611,5 +617,197 @@ impl ChestTypeExt for ChestType {
             Self::Left => Self::Right,
             Self::Right => Self::Left,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex, Weak};
+
+    use arc_swap::ArcSwap;
+    use pumpkin_config::lighting::LightingEngineConfig;
+    use pumpkin_config::world::LevelConfig;
+    use pumpkin_data::dimension::Dimension;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+    use pumpkin_data::{Block, BlockStateId};
+    use pumpkin_inventory::Inventory;
+    use pumpkin_inventory::double::DoubleInventory;
+    use pumpkin_util::math::position::BlockPos;
+    use pumpkin_util::math::vector2::Vector2;
+    use pumpkin_util::world_seed::Seed;
+    use pumpkin_world::chunk::ChunkData;
+    use pumpkin_world::level::Level;
+    use pumpkin_world::world::BlockFlags;
+    use pumpkin_world::world_info::LevelData;
+
+    use crate::block::entities::BlockEntity;
+    use crate::block::registry::default_registry;
+    use crate::server::Server;
+    use crate::world::World;
+    use crate::world::scoreboard::Scoreboard;
+
+    const CHEST: BlockPos = BlockPos::new(8, 80, 8);
+    const CHEST_OTHER_HALF: BlockPos = BlockPos::new(9, 80, 8);
+    const BARREL: BlockPos = BlockPos::new(8, 81, 8);
+
+    struct Probe {
+        runtime: tokio::runtime::Runtime,
+        world: Arc<World>,
+        level: Arc<Level>,
+        root: PathBuf,
+    }
+
+    impl Probe {
+        #[expect(
+            clippy::expect_used,
+            reason = "the container check needs a runtime and a temporary world folder"
+        )]
+        fn boot() -> Self {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_time()
+                .build()
+                .expect("container persist runtime");
+            let root = std::env::temp_dir().join(format!("pumpkin-a20-{}", std::process::id()));
+            std::fs::create_dir_all(&root).expect("container persist world folder");
+            let folder = root.clone();
+            let (world, level) = runtime.block_on(async move { open_world(folder) });
+            let probe = Self {
+                runtime,
+                world,
+                level,
+                root,
+            };
+            probe
+                .level
+                .loaded_chunks
+                .insert(Vector2::new(0, 0), ChunkData::empty_sync(0, 0));
+            probe
+        }
+
+        fn place(&self, pos: BlockPos, state: BlockStateId) {
+            self.world.set_block_state(
+                &pos,
+                state,
+                BlockFlags::UPDATE_KNOWN_SHAPE | BlockFlags::SKIP_DROPS,
+            );
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.runtime.block_on(self.level.shutdown());
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn open_world(root: PathBuf) -> (Arc<World>, Arc<Level>) {
+        let config = LevelConfig {
+            lighting: LightingEngineConfig::Full,
+            ..LevelConfig::default()
+        };
+        let dimension = Dimension::OVERWORLD.clone();
+        let level = Level::from_root_folder(&config, root, 1, dimension.clone());
+        let level_info = Arc::new(ArcSwap::new(Arc::new(LevelData::default(Seed(1)))));
+        let world = Arc::new(World::load(
+            level.clone(),
+            level_info,
+            dimension,
+            default_registry(),
+            Arc::new(Mutex::new(Scoreboard::default())),
+            Weak::<Server>::new(),
+        ));
+        (world, level)
+    }
+
+    fn put_stack(world: &Arc<World>, pos: BlockPos, slot: usize, stack: ItemStack) -> bool {
+        let Some(inventory) = world
+            .get_block_entity(&pos)
+            .and_then(BlockEntity::get_inventory)
+        else {
+            return false;
+        };
+        inventory.on_open();
+        inventory.set_stack(slot, stack);
+        inventory.on_close();
+        true
+    }
+
+    fn read_slot(world: &Arc<World>, pos: BlockPos, slot: usize) -> Option<(u16, u8)> {
+        let inventory = world
+            .get_block_entity(&pos)
+            .and_then(BlockEntity::get_inventory)?;
+        let stack = inventory.get_stack(slot);
+        Some((stack.get_item().id, stack.item_count))
+    }
+
+    /// Placing into the live inventory used to leave the chunk snapshot empty, so a
+    /// reload after the window closed came back with nothing in it.
+    #[test]
+    fn chest_and_barrel_stacks_survive_dropping_the_live_entities() {
+        let probe = Probe::boot();
+        probe.place(CHEST, Block::CHEST.default_state.id);
+        probe.place(CHEST_OTHER_HALF, Block::CHEST.default_state.id);
+        probe.place(BARREL, Block::BARREL.default_state.id);
+
+        let right = probe
+            .world
+            .get_block_entity(&CHEST)
+            .and_then(BlockEntity::get_inventory);
+        let left = probe
+            .world
+            .get_block_entity(&CHEST_OTHER_HALF)
+            .and_then(BlockEntity::get_inventory);
+        assert!(right.is_some(), "right chest was not created");
+        assert!(left.is_some(), "left chest was not created");
+        let (Some(right), Some(left)) = (right, left) else {
+            return;
+        };
+        let double = DoubleInventory::new(right, left);
+        double.on_open();
+        double.set_stack(0, ItemStack::new(4, &Item::DIAMOND));
+        double.set_stack(27, ItemStack::new(2, &Item::EMERALD));
+        double.on_close();
+
+        assert!(
+            put_stack(
+                &probe.world,
+                BARREL,
+                0,
+                ItemStack::new(7, &Item::OAK_PLANKS),
+            ),
+            "barrel should accept a stack"
+        );
+
+        assert_eq!(
+            read_slot(&probe.world, CHEST, 0),
+            Some((Item::DIAMOND.id, 4)),
+            "the chest still has the stack after the window closes"
+        );
+        assert_eq!(
+            read_slot(&probe.world, CHEST_OTHER_HALF, 0),
+            Some((Item::EMERALD.id, 2)),
+            "the other half of the double chest keeps its own stack"
+        );
+
+        probe.world.block_entities.clear();
+
+        assert_eq!(
+            read_slot(&probe.world, CHEST, 0),
+            Some((Item::DIAMOND.id, 4)),
+            "the chest stack should be in the chunk snapshot"
+        );
+        assert_eq!(
+            read_slot(&probe.world, CHEST_OTHER_HALF, 0),
+            Some((Item::EMERALD.id, 2)),
+            "the other half should be in the chunk snapshot"
+        );
+        assert_eq!(
+            read_slot(&probe.world, BARREL, 0),
+            Some((Item::OAK_PLANKS.id, 7)),
+            "the barrel stack should be in the chunk snapshot"
+        );
     }
 }
