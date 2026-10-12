@@ -3,6 +3,7 @@ pub mod damage_type_loader;
 pub mod dynamic_registry_loader;
 pub mod function_loader;
 pub mod loot_table_loader;
+pub mod predicate_loader;
 pub mod recipe_loader;
 pub mod structure_loader;
 pub mod test_loader;
@@ -28,6 +29,7 @@ use crate::world::loot::LootTableHandle;
 
 use self::context_provider_loader::ContextProviderRegistry;
 use self::damage_type_loader::{DamageTypeDefinition, DamageTypeEntry, DamageTypeRegistry};
+use self::predicate_loader::Predicate;
 use self::test_loader::{
     TestInstance, TestInstanceRegistry, load_test_instances_from_dir, to_registry_entry,
 };
@@ -80,6 +82,7 @@ pub struct DatapackManager {
     context_float_providers: RwLock<ContextProviderRegistry>,
     damage_types: RwLock<DamageTypeRegistry>,
     loot_tables: RwLock<HashMap<String, Arc<DynamicLootTable>>>,
+    predicates: RwLock<HashMap<String, Arc<Predicate>>>,
     dynamic_registries: RwLock<HashMap<String, HashMap<String, RegistryEntryData>>>,
     trade_registry: RwLock<TradeRegistry>,
 }
@@ -111,6 +114,7 @@ impl DatapackManager {
             context_float_providers: RwLock::new(HashMap::new()),
             damage_types: RwLock::new(HashMap::new()),
             loot_tables: RwLock::new(HashMap::new()),
+            predicates: RwLock::new(HashMap::new()),
             dynamic_registries: RwLock::new(HashMap::new()),
             trade_registry: RwLock::new(TradeRegistry::new()),
         }
@@ -133,6 +137,11 @@ impl DatapackManager {
         let mut all_context_float_providers: ContextProviderRegistry = HashMap::new();
         let mut all_damage_type_defs: HashMap<String, DamageTypeDefinition> = HashMap::new();
         let mut all_loot_tables: HashMap<String, Arc<DynamicLootTable>> = HashMap::new();
+        let mut all_predicates: HashMap<String, Arc<Predicate>> = HashMap::new();
+        let embedded_predicates = predicate_loader::load_embedded_predicates(&mut all_predicates);
+        if embedded_predicates > 0 {
+            info!("Loaded {embedded_predicates} embedded predicate(s)");
+        }
 
         // Embedded test instances are compile-time constants and always load,
         // so on-disk packs can override them by id.
@@ -163,6 +172,7 @@ impl DatapackManager {
             context_int_providers: &mut all_context_int_providers,
             context_float_providers: &mut all_context_float_providers,
             loot_tables: &mut all_loot_tables,
+            predicates: &mut all_predicates,
             dynamic_registries: &mut all_dynamic_registries,
             trade_registry: &mut all_trade_registry,
         };
@@ -210,6 +220,10 @@ impl DatapackManager {
             .loot_tables
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = all_loot_tables;
+        *self
+            .predicates
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = all_predicates;
         *self
             .dynamic_registries
             .write()
@@ -346,6 +360,21 @@ impl DatapackManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key, table);
+    }
+
+    /// Returns a loaded predicate. Ids without a namespace are read as `minecraft:`.
+    #[must_use]
+    pub fn get_predicate(&self, key: &str) -> Option<Arc<Predicate>> {
+        let full_key = if key.contains(':') {
+            key.to_string()
+        } else {
+            format!("minecraft:{key}")
+        };
+        let guard = self
+            .predicates
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.get(&full_key).or_else(|| guard.get(key)).cloned()
     }
 
     #[must_use]
@@ -1230,6 +1259,7 @@ struct PackContentAccumulators<'a> {
     context_int_providers: &'a mut ContextProviderRegistry,
     context_float_providers: &'a mut ContextProviderRegistry,
     loot_tables: &'a mut HashMap<String, Arc<DynamicLootTable>>,
+    predicates: &'a mut HashMap<String, Arc<Predicate>>,
     dynamic_registries: &'a mut HashMap<String, HashMap<String, RegistryEntryData>>,
     trade_registry: &'a mut TradeRegistry,
 }
@@ -1243,6 +1273,7 @@ struct PackContentCounts {
     int_providers: usize,
     float_providers: usize,
     loot_tables: usize,
+    predicates: usize,
     structures: usize,
     template_pools: usize,
     processor_lists: usize,
@@ -1292,7 +1323,7 @@ fn scan_datapacks_dir(
         let counts = load_pack_contents(&pack_path, acc);
 
         info!(
-            "Loaded datapack '{file_name}': {} recipe(s), {} function(s), {} test instance(s), {} damage type(s), {} int provider(s), {} float provider(s), {} loot table(s), {} structure(s), {} template pool(s), {} processor list(s), {} dynamic registry entry/entries, {} trade set(s), {} trade(s)",
+            "Loaded datapack '{file_name}': {} recipe(s), {} function(s), {} test instance(s), {} damage type(s), {} int provider(s), {} float provider(s), {} loot table(s), {} predicate(s), {} structure(s), {} template pool(s), {} processor list(s), {} dynamic registry entry/entries, {} trade set(s), {} trade(s)",
             counts.recipes,
             counts.functions,
             counts.test_instances,
@@ -1300,6 +1331,7 @@ fn scan_datapacks_dir(
             counts.int_providers,
             counts.float_providers,
             counts.loot_tables,
+            counts.predicates,
             counts.structures,
             counts.template_pools,
             counts.processor_lists,
@@ -1322,7 +1354,7 @@ fn scan_datapacks_dir(
 }
 
 /// Loads recipes, functions, function tags, test instances, damage types, context number providers,
-/// and loot tables from a single datapack directory, returning per-pack counts as [`PackContentCounts`].
+/// loot tables, and predicates from a single datapack directory, returning per-pack counts as [`PackContentCounts`].
 #[allow(clippy::too_many_lines)]
 fn load_pack_contents(
     pack_path: &Path,
@@ -1429,6 +1461,18 @@ fn load_pack_contents(
                         &namespace,
                         &lt_dir,
                         acc.loot_tables,
+                    );
+                }
+            }
+
+            // Load predicates. Unknown types are reported inside the loader and skipped.
+            for predicate_sub in ["predicate", "predicates"] {
+                let predicate_dir = ns_path.join(predicate_sub);
+                if predicate_dir.is_dir() {
+                    counts.predicates += predicate_loader::load_predicates_from_dir(
+                        &namespace,
+                        &predicate_dir,
+                        acc.predicates,
                     );
                 }
             }
@@ -1824,5 +1868,91 @@ mod tests {
                 "minecraft:bundle"
             ]
         );
+    }
+
+    #[test]
+    fn predicates_load_without_dropping_recipes_or_loot() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use pumpkin_protocol::codec::recipe::DynamicRecipe;
+        use pumpkin_util::loot_table::DynamicLootTable;
+
+        use super::context_provider_loader::ContextProviderRegistry;
+        use super::damage_type_loader::DamageTypeDefinition;
+        use super::predicate_loader::Predicate;
+        use super::test_loader::TestInstanceRegistry;
+        use super::trade_loader::TradeRegistry;
+        use super::{PackContentAccumulators, load_pack_contents};
+
+        let pack = tempfile::tempdir().expect("tempdir");
+        let root = pack.path();
+        let namespace = root.join("data").join("test");
+        std::fs::create_dir_all(namespace.join("predicate")).expect("predicate dir");
+        std::fs::create_dir_all(namespace.join("recipe")).expect("recipe dir");
+        std::fs::create_dir_all(namespace.join("loot_table")).expect("loot dir");
+        std::fs::write(
+            namespace.join("predicate").join("can_shear.json"),
+            include_str!(
+                "../../../../../assets/datapack/data/minecraft/predicate/tool/can_shear.json"
+            ),
+        )
+        .expect("write shears predicate");
+        std::fs::write(
+            namespace.join("predicate").join("fast_cooking.json"),
+            include_str!(
+                "../../../../../assets/datapack/data/minecraft/predicate/block/fast_cooking.json"
+            ),
+        )
+        .expect("write fast cooking predicate");
+        std::fs::write(
+            namespace.join("recipe").join("planks.json"),
+            r#"{
+                "type": "minecraft:crafting_shapeless",
+                "ingredients": ["minecraft:oak_log"],
+                "result": { "id": "minecraft:oak_planks", "count": 4 }
+            }"#,
+        )
+        .expect("write recipe");
+        std::fs::write(
+            namespace.join("loot_table").join("white_stained_glass.json"),
+            include_str!(
+                "../../../../../assets/datapack/data/minecraft/loot_table/blocks/white_stained_glass.json"
+            ),
+        )
+        .expect("write loot table");
+
+        let mut recipes: Vec<DynamicRecipe> = Vec::new();
+        let mut functions = HashMap::new();
+        let mut function_tags = HashMap::new();
+        let mut test_instances: TestInstanceRegistry = HashMap::new();
+        let mut damage_types: HashMap<String, DamageTypeDefinition> = HashMap::new();
+        let mut context_int_providers: ContextProviderRegistry = HashMap::new();
+        let mut context_float_providers: ContextProviderRegistry = HashMap::new();
+        let mut loot_tables: HashMap<String, Arc<DynamicLootTable>> = HashMap::new();
+        let mut predicates: HashMap<String, Arc<Predicate>> = HashMap::new();
+        let mut dynamic_registries = HashMap::new();
+        let mut trade_registry = TradeRegistry::new();
+        let mut acc = PackContentAccumulators {
+            recipes: &mut recipes,
+            functions: &mut functions,
+            function_tags: &mut function_tags,
+            test_instances: &mut test_instances,
+            damage_types: &mut damage_types,
+            context_int_providers: &mut context_int_providers,
+            context_float_providers: &mut context_float_providers,
+            loot_tables: &mut loot_tables,
+            predicates: &mut predicates,
+            dynamic_registries: &mut dynamic_registries,
+            trade_registry: &mut trade_registry,
+        };
+
+        let counts = load_pack_contents(root, &mut acc);
+        assert_eq!(counts.recipes, 1);
+        assert_eq!(counts.loot_tables, 1);
+        assert_eq!(counts.predicates, 1);
+        assert!(predicates.contains_key("test:can_shear"));
+        assert!(!predicates.contains_key("test:fast_cooking"));
+        assert!(loot_tables.contains_key("test:white_stained_glass"));
     }
 }
