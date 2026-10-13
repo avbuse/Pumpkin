@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use pumpkin_data::Block;
 use pumpkin_data::BlockState;
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::entity::EntityType;
@@ -8,6 +11,17 @@ pub use pumpkin_util::loot_table::{
     LootCondition, LootEntry, LootPool, LootTable,
 };
 use pumpkin_util::random::{RandomImpl, xoroshiro128::Xoroshiro};
+
+use crate::data::datapack::predicate_loader::{self, PredicateContext};
+
+/// Resolves a `minecraft:reference` condition.
+///
+/// Pass the server's `get_predicate`. A-43 and A-44 are the callers. Loot generation
+/// uses the lookup when it is set.
+pub type PredicateLookup = Arc<dyn Fn(&str) -> Option<Arc<DynamicLootCondition>> + Send + Sync>;
+
+/// Nested `minecraft:reference` conditions followed before the check fails.
+const MAX_PREDICATE_REFERENCE_DEPTH: u8 = 8;
 
 #[derive(Default, Clone)]
 pub struct LootContextParameters {
@@ -27,6 +41,26 @@ pub struct LootContextParameters {
     /// Whether the killed entity was on fire at death time.
     /// Computed from `Entity.fire_ticks > 0`.
     pub is_on_fire: Option<bool>,
+    /// Structure ids containing the loot position. Used by entity location checks.
+    pub structures: Vec<String>,
+    /// Lookup for [`DynamicLootCondition::Reference`]. Unset references fail the condition.
+    /// A-43 and A-44 supply this from `get_predicate`.
+    pub predicate_lookup: Option<PredicateLookup>,
+}
+
+fn predicate_context(params: &LootContextParameters) -> PredicateContext {
+    PredicateContext {
+        item: params
+            .tool
+            .as_ref()
+            .map(predicate_loader::item_sample_from_stack),
+        block_id: params.block_state.map(|state| {
+            let block = Block::from_state_id(state.id);
+            block.name.to_string()
+        }),
+        on_fire: params.is_on_fire.unwrap_or(false),
+        structures: params.structures.clone(),
+    }
 }
 
 fn check_dynamic_condition(
@@ -36,6 +70,26 @@ fn check_dynamic_condition(
     fortune_level: i32,
     params: &LootContextParameters,
     rng: &mut Xoroshiro,
+) -> bool {
+    check_dynamic_condition_inner(
+        cond,
+        has_silk_touch,
+        has_shears,
+        fortune_level,
+        params,
+        rng,
+        0,
+    )
+}
+
+fn check_dynamic_condition_inner(
+    cond: &DynamicLootCondition,
+    has_silk_touch: bool,
+    has_shears: bool,
+    fortune_level: i32,
+    params: &LootContextParameters,
+    rng: &mut Xoroshiro,
+    depth: u8,
 ) -> bool {
     match cond {
         DynamicLootCondition::None => true,
@@ -69,15 +123,50 @@ fn check_dynamic_condition(
                 .is_some_and(|chance| rng.next_f32() < *chance)
         }
         DynamicLootCondition::AllOf(conditions) => conditions.iter().all(|c| {
-            check_dynamic_condition(c, has_silk_touch, has_shears, fortune_level, params, rng)
+            check_dynamic_condition_inner(
+                c,
+                has_silk_touch,
+                has_shears,
+                fortune_level,
+                params,
+                rng,
+                depth,
+            )
         }),
         DynamicLootCondition::AnyOf(conditions) => conditions.iter().any(|c| {
-            check_dynamic_condition(c, has_silk_touch, has_shears, fortune_level, params, rng)
+            check_dynamic_condition_inner(
+                c,
+                has_silk_touch,
+                has_shears,
+                fortune_level,
+                params,
+                rng,
+                depth,
+            )
         }),
-        DynamicLootCondition::Inverted(cond) => {
-            !check_dynamic_condition(cond, has_silk_touch, has_shears, fortune_level, params, rng)
+        DynamicLootCondition::Inverted(cond) => !check_dynamic_condition_inner(
+            cond,
+            has_silk_touch,
+            has_shears,
+            fortune_level,
+            params,
+            rng,
+            depth,
+        ),
+        DynamicLootCondition::EntityProperties(_)
+        | DynamicLootCondition::MatchTool(_)
+        | DynamicLootCondition::MatchBlock(_) => {
+            predicate_loader::test_predicate(cond, &predicate_context(params), &|_| None)
         }
-        DynamicLootCondition::EntityOnFire => params.is_on_fire.unwrap_or(false),
+        DynamicLootCondition::Reference(id) => resolve_predicate_reference(
+            id,
+            has_silk_touch,
+            has_shears,
+            fortune_level,
+            params,
+            rng,
+            depth,
+        ),
         DynamicLootCondition::WeatherCheck {
             raining,
             thundering,
@@ -95,6 +184,35 @@ fn check_dynamic_condition(
             true
         }
     }
+}
+
+fn resolve_predicate_reference(
+    id: &str,
+    has_silk_touch: bool,
+    has_shears: bool,
+    fortune_level: i32,
+    params: &LootContextParameters,
+    rng: &mut Xoroshiro,
+    depth: u8,
+) -> bool {
+    if depth >= MAX_PREDICATE_REFERENCE_DEPTH {
+        return false;
+    }
+    let Some(lookup) = &params.predicate_lookup else {
+        return false;
+    };
+    let Some(resolved) = lookup(id) else {
+        return false;
+    };
+    check_dynamic_condition_inner(
+        &resolved,
+        has_silk_touch,
+        has_shears,
+        fortune_level,
+        params,
+        rng,
+        depth + 1,
+    )
 }
 
 fn check_condition(
@@ -594,5 +712,136 @@ fn shuffle_and_split_items(
     for i in (1..n).rev() {
         let j = rng.next_bounded_i32((i + 1) as i32) as usize;
         result.swap(i, j);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pumpkin_data::Enchantment;
+    use pumpkin_util::loot_table::{EnchantmentPredicate, ItemPredicate, NameEntry, NameSet};
+
+    fn gated_table(condition: DynamicLootCondition) -> DynamicLootTable {
+        DynamicLootTable {
+            pools: vec![DynamicLootPool {
+                entries: vec![DynamicLootEntry {
+                    item: "minecraft:dirt".to_string(),
+                    weight: 1,
+                    min_count: 1,
+                    max_count: 1,
+                    condition: DynamicLootCondition::None,
+                    bonus_formula: None,
+                }],
+                min_rolls: 1,
+                max_rolls: 1,
+                empty_weight: 0,
+                condition,
+            }],
+        }
+    }
+
+    fn silk_touch_tool() -> ItemPredicate {
+        ItemPredicate {
+            items: None,
+            enchantments: vec![EnchantmentPredicate {
+                enchantments: NameSet {
+                    entries: vec![NameEntry::Id("minecraft:silk_touch".to_string())],
+                },
+                min_level: Some(1),
+                max_level: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn match_tool_requires_the_enchantment_on_the_tool() {
+        let table = gated_table(DynamicLootCondition::MatchTool(silk_touch_tool()));
+        let bare = ItemStack::new(1, &Item::DIAMOND_PICKAXE);
+        let mut silk = bare.clone();
+        silk.enchant(&Enchantment::SILK_TOUCH, 1);
+
+        let without = generate_dynamic_loot_with_context(
+            &table,
+            1,
+            &LootContextParameters {
+                tool: Some(bare),
+                ..LootContextParameters::default()
+            },
+        );
+        let with = generate_dynamic_loot_with_context(
+            &table,
+            1,
+            &LootContextParameters {
+                tool: Some(silk),
+                ..LootContextParameters::default()
+            },
+        );
+
+        assert!(without.is_empty());
+        assert_eq!(with.len(), 1);
+        assert_eq!(with[0].item.registry_key, "dirt");
+    }
+
+    #[test]
+    fn match_block_accepts_smoker_and_rejects_furnace() {
+        let blocks = NameSet {
+            entries: vec![
+                NameEntry::Id("minecraft:smoker".to_string()),
+                NameEntry::Id("minecraft:blast_furnace".to_string()),
+            ],
+        };
+        let table = gated_table(DynamicLootCondition::MatchBlock(blocks));
+        let smoker = generate_dynamic_loot_with_context(
+            &table,
+            1,
+            &LootContextParameters {
+                block_state: Some(Block::SMOKER.default_state),
+                ..LootContextParameters::default()
+            },
+        );
+        let furnace = generate_dynamic_loot_with_context(
+            &table,
+            1,
+            &LootContextParameters {
+                block_state: Some(Block::FURNACE.default_state),
+                ..LootContextParameters::default()
+            },
+        );
+
+        assert_eq!(smoker.len(), 1);
+        assert!(furnace.is_empty());
+    }
+
+    #[test]
+    fn reference_resolves_when_the_lookup_is_set() {
+        let silk = Arc::new(DynamicLootCondition::MatchTool(silk_touch_tool()));
+        let lookup: PredicateLookup =
+            Arc::new(move |id: &str| (id == "minecraft:tool/can_silk_touch").then(|| silk.clone()));
+        let table = gated_table(DynamicLootCondition::Reference(
+            "minecraft:tool/can_silk_touch".to_string(),
+        ));
+        let mut tool = ItemStack::new(1, &Item::DIAMOND_PICKAXE);
+        tool.enchant(&Enchantment::SILK_TOUCH, 1);
+
+        let unresolved = generate_dynamic_loot_with_context(
+            &table,
+            1,
+            &LootContextParameters {
+                tool: Some(tool.clone()),
+                ..LootContextParameters::default()
+            },
+        );
+        let resolved = generate_dynamic_loot_with_context(
+            &table,
+            1,
+            &LootContextParameters {
+                tool: Some(tool),
+                predicate_lookup: Some(lookup),
+                ..LootContextParameters::default()
+            },
+        );
+
+        assert!(unresolved.is_empty());
+        assert_eq!(resolved.len(), 1);
     }
 }

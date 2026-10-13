@@ -20,7 +20,7 @@ use pumpkin_data::registry::RegistryEntryData;
 use pumpkin_nbt::tag::NbtTag;
 use pumpkin_nbt::{NbtCompound, nbt_compress::read_gzip_compound_tag};
 use pumpkin_protocol::codec::recipe::DynamicRecipe;
-use pumpkin_util::loot_table::DynamicLootTable;
+use pumpkin_util::loot_table::{DynamicLootCondition, DynamicLootTable};
 
 use crate::command::context::command_source::CommandSource;
 use crate::server::Server;
@@ -29,7 +29,6 @@ use crate::world::loot::LootTableHandle;
 
 use self::context_provider_loader::ContextProviderRegistry;
 use self::damage_type_loader::{DamageTypeDefinition, DamageTypeEntry, DamageTypeRegistry};
-use self::predicate_loader::Predicate;
 use self::test_loader::{
     TestInstance, TestInstanceRegistry, load_test_instances_from_dir, to_registry_entry,
 };
@@ -82,7 +81,7 @@ pub struct DatapackManager {
     context_float_providers: RwLock<ContextProviderRegistry>,
     damage_types: RwLock<DamageTypeRegistry>,
     loot_tables: RwLock<HashMap<String, Arc<DynamicLootTable>>>,
-    predicates: RwLock<HashMap<String, Arc<Predicate>>>,
+    predicates: RwLock<HashMap<String, Arc<DynamicLootCondition>>>,
     dynamic_registries: RwLock<HashMap<String, HashMap<String, RegistryEntryData>>>,
     trade_registry: RwLock<TradeRegistry>,
 }
@@ -137,7 +136,7 @@ impl DatapackManager {
         let mut all_context_float_providers: ContextProviderRegistry = HashMap::new();
         let mut all_damage_type_defs: HashMap<String, DamageTypeDefinition> = HashMap::new();
         let mut all_loot_tables: HashMap<String, Arc<DynamicLootTable>> = HashMap::new();
-        let mut all_predicates: HashMap<String, Arc<Predicate>> = HashMap::new();
+        let mut all_predicates: HashMap<String, Arc<DynamicLootCondition>> = HashMap::new();
         let embedded_predicates = predicate_loader::load_embedded_predicates(&mut all_predicates);
         if embedded_predicates > 0 {
             info!("Loaded {embedded_predicates} embedded predicate(s)");
@@ -363,8 +362,11 @@ impl DatapackManager {
     }
 
     /// Returns a loaded predicate. Ids without a namespace are read as `minecraft:`.
+    ///
+    /// Loot tables store the same id on [`DynamicLootCondition::Reference`]. A-43 and
+    /// A-44 call this to resolve those ids for advancements and loot.
     #[must_use]
-    pub fn get_predicate(&self, key: &str) -> Option<Arc<Predicate>> {
+    pub fn get_predicate(&self, key: &str) -> Option<Arc<DynamicLootCondition>> {
         let full_key = if key.contains(':') {
             key.to_string()
         } else {
@@ -1259,7 +1261,7 @@ struct PackContentAccumulators<'a> {
     context_int_providers: &'a mut ContextProviderRegistry,
     context_float_providers: &'a mut ContextProviderRegistry,
     loot_tables: &'a mut HashMap<String, Arc<DynamicLootTable>>,
-    predicates: &'a mut HashMap<String, Arc<Predicate>>,
+    predicates: &'a mut HashMap<String, Arc<DynamicLootCondition>>,
     dynamic_registries: &'a mut HashMap<String, HashMap<String, RegistryEntryData>>,
     trade_registry: &'a mut TradeRegistry,
 }
@@ -1465,16 +1467,14 @@ fn load_pack_contents(
                 }
             }
 
-            // Load predicates. Unknown types are reported inside the loader and skipped.
-            for predicate_sub in ["predicate", "predicates"] {
-                let predicate_dir = ns_path.join(predicate_sub);
-                if predicate_dir.is_dir() {
-                    counts.predicates += predicate_loader::load_predicates_from_dir(
-                        &namespace,
-                        &predicate_dir,
-                        acc.predicates,
-                    );
-                }
+            // Vanilla 26.3 uses `predicate/` only.
+            let predicate_dir = ns_path.join("predicate");
+            if predicate_dir.is_dir() {
+                counts.predicates += predicate_loader::load_predicates_from_dir(
+                    &namespace,
+                    &predicate_dir,
+                    acc.predicates,
+                );
             }
 
             // Load structure templates
@@ -1876,11 +1876,10 @@ mod tests {
         use std::sync::Arc;
 
         use pumpkin_protocol::codec::recipe::DynamicRecipe;
-        use pumpkin_util::loot_table::DynamicLootTable;
+        use pumpkin_util::loot_table::{DynamicLootCondition, DynamicLootTable};
 
         use super::context_provider_loader::ContextProviderRegistry;
         use super::damage_type_loader::DamageTypeDefinition;
-        use super::predicate_loader::Predicate;
         use super::test_loader::TestInstanceRegistry;
         use super::trade_loader::TradeRegistry;
         use super::{PackContentAccumulators, load_pack_contents};
@@ -1889,6 +1888,7 @@ mod tests {
         let root = pack.path();
         let namespace = root.join("data").join("test");
         std::fs::create_dir_all(namespace.join("predicate")).expect("predicate dir");
+        std::fs::create_dir_all(namespace.join("predicates")).expect("plural dir");
         std::fs::create_dir_all(namespace.join("recipe")).expect("recipe dir");
         std::fs::create_dir_all(namespace.join("loot_table")).expect("loot dir");
         std::fs::write(
@@ -1898,6 +1898,18 @@ mod tests {
             ),
         )
         .expect("write shears predicate");
+        std::fs::write(
+            namespace.join("predicate").join("unknown.json"),
+            r#"{ "type": "minecraft:not_a_real_predicate" }"#,
+        )
+        .expect("write unknown predicate");
+        std::fs::write(
+            namespace.join("predicates").join("ignored.json"),
+            include_str!(
+                "../../../../../assets/datapack/data/minecraft/predicate/tool/can_shear.json"
+            ),
+        )
+        .expect("write plural predicate");
         std::fs::write(
             namespace.join("predicate").join("fast_cooking.json"),
             include_str!(
@@ -1930,7 +1942,7 @@ mod tests {
         let mut context_int_providers: ContextProviderRegistry = HashMap::new();
         let mut context_float_providers: ContextProviderRegistry = HashMap::new();
         let mut loot_tables: HashMap<String, Arc<DynamicLootTable>> = HashMap::new();
-        let mut predicates: HashMap<String, Arc<Predicate>> = HashMap::new();
+        let mut predicates: HashMap<String, Arc<DynamicLootCondition>> = HashMap::new();
         let mut dynamic_registries = HashMap::new();
         let mut trade_registry = TradeRegistry::new();
         let mut acc = PackContentAccumulators {
@@ -1950,9 +1962,51 @@ mod tests {
         let counts = load_pack_contents(root, &mut acc);
         assert_eq!(counts.recipes, 1);
         assert_eq!(counts.loot_tables, 1);
-        assert_eq!(counts.predicates, 1);
+        assert_eq!(counts.predicates, 2);
         assert!(predicates.contains_key("test:can_shear"));
-        assert!(!predicates.contains_key("test:fast_cooking"));
-        assert!(loot_tables.contains_key("test:white_stained_glass"));
+        assert!(matches!(
+            predicates.get("test:fast_cooking").map(Arc::as_ref),
+            Some(DynamicLootCondition::MatchBlock(_))
+        ));
+        assert!(!predicates.contains_key("test:unknown"));
+        assert!(!predicates.contains_key("test:ignored"));
+        let glass = loot_tables
+            .get("test:white_stained_glass")
+            .expect("glass loot");
+        assert_eq!(
+            glass.pools[0].condition,
+            DynamicLootCondition::Reference("minecraft:tool/can_silk_touch".to_string())
+        );
+    }
+
+    #[test]
+    fn get_predicate_returns_the_loaded_condition() {
+        use std::collections::HashMap;
+
+        use pumpkin_util::loot_table::DynamicLootCondition;
+
+        let manager = DatapackManager::new();
+        let mut predicates = HashMap::new();
+        super::predicate_loader::load_embedded_predicates(&mut predicates);
+        *manager
+            .predicates
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = predicates;
+
+        let fast_cooking = manager
+            .get_predicate("block/fast_cooking")
+            .expect("fast cooking");
+        assert!(matches!(
+            fast_cooking.as_ref(),
+            DynamicLootCondition::MatchBlock(_)
+        ));
+        let silk_touch = manager
+            .get_predicate("minecraft:tool/can_silk_touch")
+            .expect("silk touch");
+        assert!(matches!(
+            silk_touch.as_ref(),
+            DynamicLootCondition::MatchTool(_)
+        ));
+        assert!(manager.get_predicate("minecraft:missing").is_none());
     }
 }

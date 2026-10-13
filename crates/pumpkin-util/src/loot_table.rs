@@ -76,7 +76,52 @@ pub type ChestLootEntry = LootEntry;
 pub type ChestLootPool = LootPool;
 pub type ChestLootTable = LootTable;
 
+/// One registry id, or a tag stored without the leading `#`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameEntry {
+    Id(String),
+    Tag(String),
+}
+
+/// A single id, a tag, or a list of either. Any entry matching is enough.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameSet {
+    pub entries: Vec<NameEntry>,
+}
+
+/// An enchantment id or tag, plus an inclusive level range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnchantmentPredicate {
+    pub enchantments: NameSet,
+    pub min_level: Option<i32>,
+    pub max_level: Option<i32>,
+}
+
+/// Item id, item tag, and enchantment checks from an item predicate.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ItemPredicate {
+    /// `None` accepts any item.
+    pub items: Option<NameSet>,
+    pub enchantments: Vec<EnchantmentPredicate>,
+}
+
+/// Location check. Story advancements only name a structure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocationPredicate {
+    pub structures: Option<NameSet>,
+}
+
+/// Entity sub-predicates used by loot conditions and predicate files.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EntityPredicate {
+    pub on_fire: Option<bool>,
+    pub location: Option<LocationPredicate>,
+}
+
 /// Conditions required for an entry or pool to be eligible for dynamic loot generation.
+///
+/// Predicate files parse into this type. `Reference` holds a predicate id. `get_predicate`
+/// resolves it. A-43 and A-44 are the callers of that lookup.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum DynamicLootCondition {
     #[default]
@@ -102,11 +147,15 @@ pub enum DynamicLootCondition {
     AllOf(Vec<Self>),
     AnyOf(Vec<Self>),
     Inverted(Box<Self>),
-    EntityOnFire,
+    EntityProperties(EntityPredicate),
     WeatherCheck {
         raining: Option<bool>,
         thundering: Option<bool>,
     },
+    MatchTool(ItemPredicate),
+    MatchBlock(NameSet),
+    /// A predicate id, such as `minecraft:tool/can_silk_touch`.
+    Reference(String),
 }
 
 impl From<LootCondition> for DynamicLootCondition {
