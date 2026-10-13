@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::block::blocks::bed_spawn::{
-    BedSleepOutcome, BedSleepQuery, BedSleepRefusal, bed_half_in_reach, decide_bed_sleep,
-    entity_category_prevents_bed_rest, monster_rest_box,
+    BedRestRule, BedSleepQuery, BedSleepRefusal, bed_half_in_reach, bed_rest_rule,
+    decide_bed_sleep, monster_rest_box, prevents_bed_rest,
 };
 use crate::block::entities::bed::BedBlockEntity;
 use pumpkin_data::block_properties::BedPart;
@@ -180,6 +180,13 @@ impl BedBlock {
             return BlockActionResult::SuccessServer;
         }
 
+        // Occupied is handled before the sleep checks, same as the bed block itself.
+        if bed_props.occupied {
+            // TODO: Wake up villager
+            send_bed_refusal(player, BedSleepRefusal::Occupied);
+            return BlockActionResult::SuccessServer;
+        }
+
         let is_dark = world.is_dark_outside();
         let player_pos = player.position();
         let mut query = BedSleepQuery {
@@ -187,43 +194,22 @@ impl BedBlock {
             can_set_spawn: world.dimension.bed_rule.can_set_spawn(is_dark),
             obstructed: world.get_block_state(&bed_head_pos.up()).is_solid()
                 || world.get_block_state(&bed_foot_pos.up()).is_solid(),
-            occupied: bed_props.occupied,
             in_reach: bed_half_in_reach(player_pos, bed_head_pos)
                 || bed_half_in_reach(player_pos, bed_foot_pos),
             monster_nearby: false,
         };
-        let mut outcome = decide_bed_sleep(query);
-        // Creative skips the monster box, same as the dedicated server.
-        if matches!(outcome, BedSleepOutcome::Sleep { .. })
+        let mut decision = decide_bed_sleep(query);
+        // Creative skips the monster box. The scan runs only once sleep is otherwise allowed.
+        if decision.refusal.is_none()
             && player.gamemode.load() != GameMode::Creative
-            && monster_blocks_bed_rest(world, bed_head_pos)
+            && monster_blocks_bed_rest(world, player, bed_head_pos)
         {
             query.monster_nearby = true;
-            outcome = decide_bed_sleep(query);
+            decision = decide_bed_sleep(query);
         }
 
-        let set_spawn = match outcome {
-            BedSleepOutcome::Sleep { set_spawn } => set_spawn,
-            BedSleepOutcome::Refuse(refusal) => {
-                send_bed_refusal(player, refusal);
-                return BlockActionResult::SuccessServer;
-            }
-        };
-
-        if let Some(server) = world.server.upgrade() {
-            let mut event =
-                crate::plugin::api::events::player::player_bed::PlayerBedEnterEvent::new(
-                    player.clone(),
-                    bed_head_pos,
-                );
-            server.plugin_manager.fire_blocking(&server, &mut event);
-            if event.cancelled {
-                return BlockActionResult::SuccessServer;
-            }
-        }
-
-        // The spawn moves only once sleep is actually starting.
-        if set_spawn
+        // Spawn is written here, before the night and monster refusals.
+        if decision.set_spawn
             && player.set_respawn_point(
                 world.dimension.clone(),
                 bed_head_pos,
@@ -238,8 +224,25 @@ impl BedBlock {
             ));
         }
 
+        if let Some(refusal) = decision.refusal {
+            send_bed_refusal(player, refusal);
+            return BlockActionResult::SuccessServer;
+        }
+
+        if let Some(server) = world.server.upgrade() {
+            let mut event =
+                crate::plugin::api::events::player::player_bed::PlayerBedEnterEvent::new(
+                    player.clone(),
+                    bed_head_pos,
+                );
+            server.plugin_manager.fire_blocking(&server, &mut event);
+            if event.cancelled {
+                return BlockActionResult::SuccessServer;
+            }
+        }
+
         player.sleep(bed_head_pos);
-        if set_spawn {
+        if decision.set_spawn {
             player.trigger_advancement(
                 crate::entity::player::advancement::trigger::AdvancementTrigger::SleptInBed,
             );
@@ -289,16 +292,24 @@ impl BedBlock {
     }
 }
 
-fn monster_blocks_bed_rest(world: &World, bed_head: BlockPos) -> bool {
+fn monster_blocks_bed_rest(world: &World, player: &Player, bed_head: BlockPos) -> bool {
     world
         .get_entities_at_box(&monster_rest_box(bed_head))
         .iter()
-        .any(|entity| entity_category_prevents_bed_rest(entity.get_entity().entity_type.category))
+        .any(|entity| {
+            let rule = bed_rest_rule(entity.get_entity().entity_type);
+            let angry_at_player = matches!(rule, BedRestRule::PreventsRestWhileAngry)
+                && entity.get_mob().is_some_and(|mob| {
+                    mob.as_neutral()
+                        .is_some_and(|neutral| neutral.is_angry_at(player, world))
+                });
+            prevents_bed_rest(rule, angry_at_player)
+        })
 }
 
 fn send_bed_refusal(player: &Player, refusal: BedSleepRefusal) {
     let message = match refusal {
-        BedSleepRefusal::NotPossibleHere | BedSleepRefusal::NotPossibleNow => {
+        BedSleepRefusal::NotPossibleNow => {
             pumpkin_macros::translate_cross!(
                 translation::java::BLOCK_MINECRAFT_BED_NO_SLEEP,
                 translation::bedrock::TILE_BED_NOSLEEP
@@ -308,13 +319,10 @@ fn send_bed_refusal(player: &Player, refusal: BedSleepRefusal) {
             translation::java::BLOCK_MINECRAFT_BED_OBSTRUCTED,
             translation::bedrock::TILE_BED_OBSTRUCTED
         ),
-        BedSleepRefusal::Occupied => {
-            // TODO: Wake up villager
-            pumpkin_macros::translate_cross!(
-                translation::java::BLOCK_MINECRAFT_BED_OCCUPIED,
-                translation::bedrock::TILE_BED_OCCUPIED
-            )
-        }
+        BedSleepRefusal::Occupied => pumpkin_macros::translate_cross!(
+            translation::java::BLOCK_MINECRAFT_BED_OCCUPIED,
+            translation::bedrock::TILE_BED_OCCUPIED
+        ),
         BedSleepRefusal::TooFar => pumpkin_macros::translate_cross!(
             translation::java::BLOCK_MINECRAFT_BED_TOO_FAR_AWAY,
             translation::bedrock::TILE_BED_TOOFAR
