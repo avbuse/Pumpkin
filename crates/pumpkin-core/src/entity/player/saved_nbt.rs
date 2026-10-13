@@ -9,6 +9,7 @@ use pumpkin_nbt::tag::NbtTag;
 use pumpkin_util::GameMode;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
+use pumpkin_util::math::wrap_degrees;
 
 use super::RespawnPoint;
 
@@ -49,10 +50,13 @@ fn read_game_mode_tag(nbt: &NbtCompound, key: &str) -> Option<GameMode> {
         .and_then(|value| GameMode::try_from(value).ok())
 }
 
-/// Writes the 26.3 `respawn` compound and the older `Spawn*` keys.
+/// Vanilla drops a `respawn` compound whose pitch is outside this range.
+const RESPAWN_PITCH_LIMIT: f32 = 90.0;
+
+/// Writes the 26.3 `respawn` compound: `dimension`, `pos`, `yaw`, `pitch`, `forced`.
 ///
-/// The compound stores `yaw` and `pitch`. `angle` is the same yaw, kept so a
-/// reader that still looks for the previous name does not lose the facing.
+/// Yaw is wrapped into -180..180 and pitch is held within -90..90. Vanilla
+/// drops the whole compound when either value is outside that range.
 pub(super) fn write_spawn_point(nbt: &mut NbtCompound, point: Option<&RespawnPoint>) {
     let Some(point) = point else {
         return;
@@ -68,18 +72,13 @@ pub(super) fn write_spawn_point(nbt: &mut NbtCompound, point: Option<&RespawnPoi
             point.position.0.z,
         ]),
     );
-    respawn.put_float("yaw", point.yaw);
-    respawn.put_float("pitch", point.pitch);
-    respawn.put_float("angle", point.yaw);
+    respawn.put_float("yaw", wrap_degrees(point.yaw));
+    respawn.put_float(
+        "pitch",
+        point.pitch.clamp(-RESPAWN_PITCH_LIMIT, RESPAWN_PITCH_LIMIT),
+    );
     respawn.put_bool("forced", point.force);
     nbt.put_compound("respawn", respawn);
-
-    nbt.put_int("SpawnX", point.position.0.x);
-    nbt.put_int("SpawnY", point.position.0.y);
-    nbt.put_int("SpawnZ", point.position.0.z);
-    nbt.put_float("SpawnAngle", point.yaw);
-    nbt.put_string("SpawnDimension", point.dimension.minecraft_name.to_owned());
-    nbt.put_bool("SpawnForced", point.force);
 }
 
 #[must_use]
@@ -102,6 +101,7 @@ fn read_respawn_compound(
         position,
         yaw: respawn
             .get_numeric_float("yaw")
+            // Older Pumpkin files stored this facing as `angle` and did not write `yaw`.
             .or_else(|| respawn.get_numeric_float("angle"))
             .unwrap_or(0.0),
         pitch: respawn.get_numeric_float("pitch").unwrap_or(0.0),
@@ -188,8 +188,8 @@ mod tests {
         let respawn = nbt.get_compound("respawn").expect("respawn compound");
         assert_eq!(respawn.get_float("yaw"), Some(90.0));
         assert_eq!(respawn.get_float("pitch"), Some(-15.0));
-        assert_eq!(respawn.get_float("angle"), Some(90.0));
-        assert_eq!(nbt.get_float("SpawnAngle"), Some(90.0));
+        assert!(respawn.get_float("angle").is_none());
+        assert!(nbt.get_int("SpawnX").is_none());
 
         assert_eq!(read_player_health(&nbt), Some(7.5));
         assert_eq!(
@@ -197,6 +197,60 @@ mod tests {
             (GameMode::Creative, Some(GameMode::Survival))
         );
         assert_eq!(read_spawn_point(&nbt, &Dimension::OVERWORLD), Some(spawn));
+    }
+
+    #[test]
+    fn written_spawn_is_the_vanilla_compound() {
+        let mut nbt = NbtCompound::new();
+        write_spawn_point(
+            &mut nbt,
+            Some(&point(&Dimension::OVERWORLD, 4, 5, 6, 270.0, 120.0, true)),
+        );
+
+        assert!(nbt.get_int("SpawnX").is_none());
+        assert!(nbt.get_int("SpawnY").is_none());
+        assert!(nbt.get_int("SpawnZ").is_none());
+        assert!(nbt.get_float("SpawnAngle").is_none());
+        assert!(nbt.get_string("SpawnDimension").is_none());
+        assert!(nbt.get_bool("SpawnForced").is_none());
+
+        let respawn = nbt.get_compound("respawn").expect("respawn compound");
+        assert!(respawn.get_float("angle").is_none());
+        assert_eq!(respawn.get_string("dimension"), Some("minecraft:overworld"));
+        assert_eq!(respawn.get_float("yaw"), Some(-90.0));
+        assert_eq!(respawn.get_float("pitch"), Some(90.0));
+        assert_eq!(respawn.get_bool("forced"), Some(true));
+
+        let loaded = read_spawn_point(&nbt, &Dimension::THE_NETHER).expect("loaded");
+        assert_eq!(loaded.yaw, -90.0);
+        assert_eq!(loaded.pitch, 90.0);
+        assert_eq!(loaded.position, BlockPos(Vector3::new(4, 5, 6)));
+
+        let mut low = NbtCompound::new();
+        write_spawn_point(
+            &mut low,
+            Some(&point(
+                &Dimension::OVERWORLD,
+                0,
+                0,
+                0,
+                -190.0,
+                -100.0,
+                false,
+            )),
+        );
+        let low_respawn = low.get_compound("respawn").expect("low respawn");
+        assert_eq!(low_respawn.get_float("yaw"), Some(170.0));
+        assert_eq!(low_respawn.get_float("pitch"), Some(-90.0));
+
+        let mut edge = NbtCompound::new();
+        write_spawn_point(
+            &mut edge,
+            Some(&point(&Dimension::OVERWORLD, 0, 0, 0, 180.0, -90.0, false)),
+        );
+        let edge_respawn = edge.get_compound("respawn").expect("edge respawn");
+        assert_eq!(edge_respawn.get_float("yaw"), Some(-180.0));
+        assert_eq!(edge_respawn.get_float("pitch"), Some(-90.0));
     }
 
     #[test]

@@ -6737,11 +6737,14 @@ impl NBTStorage for PlayerInventory {
                 let Some(item_compound) = tag.extract_compound() else {
                     continue;
                 };
-                let Some(slot) = saved_item_slot(item_compound).and_then(inventory_slot_index)
+                let Some(slot) = item_compound
+                    .get_byte("Slot")
+                    .map(i32::from)
+                    .and_then(inventory_slot_index)
                 else {
                     continue;
                 };
-                if let Some(item_stack) = read_saved_item_stack(item_compound) {
+                if let Some(item_stack) = ItemStack::read_item_stack(item_compound) {
                     set_stack_sync(slot, item_stack);
                 }
             }
@@ -6749,44 +6752,36 @@ impl NBTStorage for PlayerInventory {
 
         if let Some(equipment) = nbt.get_compound("equipment") {
             if let Some(offhand) = equipment.get_compound("offhand")
-                && let Some(item_stack) = read_saved_item_stack(offhand)
+                && let Some(item_stack) = ItemStack::read_item_stack(offhand)
             {
                 set_stack_sync(40, item_stack);
             }
 
             if let Some(head) = equipment.get_compound("head")
-                && let Some(item_stack) = read_saved_item_stack(head)
+                && let Some(item_stack) = ItemStack::read_item_stack(head)
             {
                 set_stack_sync(39, item_stack);
             }
 
             if let Some(chest) = equipment.get_compound("chest")
-                && let Some(item_stack) = read_saved_item_stack(chest)
+                && let Some(item_stack) = ItemStack::read_item_stack(chest)
             {
                 set_stack_sync(38, item_stack);
             }
 
             if let Some(legs) = equipment.get_compound("legs")
-                && let Some(item_stack) = read_saved_item_stack(legs)
+                && let Some(item_stack) = ItemStack::read_item_stack(legs)
             {
                 set_stack_sync(37, item_stack);
             }
 
             if let Some(feet) = equipment.get_compound("feet")
-                && let Some(item_stack) = read_saved_item_stack(feet)
+                && let Some(item_stack) = ItemStack::read_item_stack(feet)
             {
                 set_stack_sync(36, item_stack);
             }
         }
     }
-}
-
-fn saved_item_slot(compound: &NbtCompound) -> Option<i32> {
-    compound
-        .get_byte("Slot")
-        .map(i32::from)
-        .or_else(|| compound.get_short("Slot").map(i32::from))
-        .or_else(|| compound.get_int("Slot"))
 }
 
 const fn inventory_slot_index(slot: i32) -> Option<usize> {
@@ -6799,30 +6794,6 @@ const fn inventory_slot_index(slot: i32) -> Option<usize> {
         0..=40 => Some(slot as usize),
         _ => None,
     }
-}
-
-/// `count` is an int in current files. A missing count is one item, and a byte
-/// or short count is still that stack rather than a dropped slot.
-fn read_saved_item_stack(compound: &NbtCompound) -> Option<ItemStack> {
-    if compound.get_int("count").is_some() {
-        return ItemStack::read_item_stack(compound);
-    }
-    let count = compound
-        .get_byte("count")
-        .map(i32::from)
-        .or_else(|| compound.get_short("count").map(i32::from))
-        .or_else(|| {
-            compound
-                .get_numeric_float("count")
-                .map(|value| value as i32)
-        })
-        .unwrap_or(1);
-    if count <= 0 {
-        return None;
-    }
-    let mut compound = compound.clone();
-    compound.put_int("count", count.clamp(1, i32::from(u8::MAX)));
-    ItemStack::read_item_stack(&compound)
 }
 
 impl NBTStorageInit for PlayerInventory {}
@@ -8203,7 +8174,7 @@ mod tests {
             position: pumpkin_util::math::position::BlockPos(
                 pumpkin_util::math::vector3::Vector3::new(12, 80, -4),
             ),
-            yaw: 180.0,
+            yaw: 90.0,
             pitch: -10.0,
             force: true,
         };
@@ -8259,35 +8230,5 @@ mod tests {
             (GameMode::Adventure, Some(GameMode::Creative))
         );
         assert_eq!(read_spawn_point(&nbt, &Dimension::OVERWORLD), Some(spawn));
-    }
-
-    #[test]
-    fn inventory_loads_int_slot_and_byte_count() {
-        use std::sync::{Arc, Mutex};
-
-        use pumpkin_data::item::Item;
-        use pumpkin_inventory::entity_equipment::EntityEquipment;
-        use pumpkin_nbt::tag::NbtTag;
-
-        use super::PlayerInventory;
-        use crate::entity::NBTStorage;
-
-        let mut odd = pumpkin_nbt::compound::NbtCompound::new();
-        let mut entry = pumpkin_nbt::compound::NbtCompound::new();
-        entry.put_int("Slot", 11);
-        entry.put_string("id", "minecraft:stick".to_string());
-        entry.put_byte("count", 2);
-        odd.put("Inventory", NbtTag::List(vec![NbtTag::Compound(entry)]));
-        let from_odd = PlayerInventory::new(
-            Arc::new(Mutex::new(EntityEquipment::new())),
-            Arc::new(pumpkin_inventory::build_equipment_slots()),
-        );
-        from_odd.read_nbt_non_mut(&odd);
-        let loaded = from_odd
-            .main_inventory
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(loaded[11].item.registry_key, Item::STICK.registry_key);
-        assert_eq!(loaded[11].item_count, 2);
     }
 }

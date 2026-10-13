@@ -170,8 +170,7 @@ impl NBTStorage for HungerManager {
     }
 
     fn read_nbt_non_mut(&self, nbt: &NbtCompound) {
-        // Absent keys keep the fresh-player defaults. A present zero must not
-        // fall through to those defaults, and a byte or short must not be skipped.
+        // Absent keys keep the fresh-player defaults. A present zero is stored.
         if let Some(level) = read_food_level(nbt) {
             self.level.store(level);
         }
@@ -188,11 +187,7 @@ impl NBTStorage for HungerManager {
 }
 
 fn read_food_level(nbt: &NbtCompound) -> Option<u8> {
-    let raw = nbt
-        .get_int("foodLevel")
-        .or_else(|| nbt.get_byte("foodLevel").map(i32::from))
-        .or_else(|| nbt.get_short("foodLevel").map(i32::from))
-        .or_else(|| nbt.get_numeric_float("foodLevel").map(|value| value as i32))?;
+    let raw = nbt.get_int("foodLevel")?;
     Some(raw.clamp(0, i32::from(MAX_FOOD)) as u8)
 }
 
@@ -241,10 +236,10 @@ mod tests {
         assert_eq!(hunger.exhaustion.load(), 0.0);
         assert_eq!(hunger.tick_timer.load(), 0);
 
-        let mut byte_level = NbtCompound::new();
-        byte_level.put_byte("foodLevel", 4);
-        byte_level.put_float("foodSaturationLevel", 0.0);
-        hunger.read_nbt_non_mut(&byte_level);
+        let mut partial = NbtCompound::new();
+        partial.put_int("foodLevel", 4);
+        partial.put_float("foodSaturationLevel", 0.0);
+        hunger.read_nbt_non_mut(&partial);
         assert_eq!(hunger.level.load(), 4);
         assert_eq!(hunger.saturation.load(), 0.0);
         assert_eq!(hunger.exhaustion.load(), 0.0);
