@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak, atomic::AtomicBool};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, atomic::AtomicBool};
 
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_util::math::position::BlockPos;
@@ -6,7 +6,6 @@ use pumpkin_util::math::position::BlockPos;
 use crate::{
     block::viewer::ViewerCountTracker, impl_block_entity_for_chest, impl_chest_helper_methods,
     impl_clearable_for_chest, impl_inventory_for_chest, impl_viewer_count_listener_for_chest,
-    world::World,
 };
 
 pub struct ChestBlockEntity {
@@ -23,9 +22,6 @@ pub struct ChestBlockEntity {
     pub loot_table: StdMutex<Option<String>>,
     /// Seed used for deterministic loot generation, paired with `loot_table`.
     pub loot_table_seed: i64,
-
-    /// World that should receive inventory snapshots. Weak so the world can own this entity.
-    bound_world: StdMutex<Weak<World>>,
 }
 
 impl ChestBlockEntity {

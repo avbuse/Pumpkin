@@ -93,7 +93,6 @@ fn placed_chest_impl<E: BlockEntity + 'static>(
     create_entity: impl FnOnce(BlockPos) -> E,
 ) {
     let chest = create_entity(*args.position);
-    chest.bind_world(args.world);
     args.world.add_block_entity(Arc::new(chest));
 
     let chest_props = ChestLikeProperties::from_state_id(args.state_id);
@@ -196,11 +195,8 @@ fn get_chest_screen_handler_factory(
     };
 
     // Unpack deferred loot table on first open (non-spectator only).
-    if let Some(ref entity) = first_chest {
-        entity.bind_world(args.world);
-        if !player_is_spectator {
-            unpack(entity);
-        }
+    if !player_is_spectator && let Some(ref entity) = first_chest {
+        unpack(entity);
     }
 
     let first_inventory = first_chest.and_then(BlockEntity::get_inventory)?;
@@ -217,15 +213,13 @@ fn get_chest_screen_handler_factory(
     }
 
     // Both halves of a double chest are unpacked at once, like vanilla's CompoundContainer.
-    if let Some(direction) = connected_towards
+    if !player_is_spectator
+        && let Some(direction) = connected_towards
         && let Some(second) = args
             .world
             .get_block_entity(&args.position.offset(direction.to_offset()))
     {
-        second.bind_world(args.world);
-        if !player_is_spectator {
-            unpack(&second);
-        }
+        unpack(&second);
     }
 
     let inventory = if let Some(direction) = connected_towards
@@ -648,6 +642,8 @@ mod tests {
     use crate::world::World;
     use crate::world::scoreboard::Scoreboard;
 
+    static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     const CHEST: BlockPos = BlockPos::new(8, 80, 8);
     const CHEST_OTHER_HALF: BlockPos = BlockPos::new(9, 80, 8);
     const BARREL: BlockPos = BlockPos::new(8, 81, 8);
@@ -660,20 +656,26 @@ mod tests {
     }
 
     impl Probe {
+        fn boot() -> Self {
+            Self::boot_with_autosave(6000)
+        }
+
         #[expect(
             clippy::expect_used,
             reason = "the container check needs a runtime and a temporary world folder"
         )]
-        fn boot() -> Self {
+        fn boot_with_autosave(autosave_ticks: u64) -> Self {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_time()
                 .build()
                 .expect("container persist runtime");
-            let root = std::env::temp_dir().join(format!("pumpkin-a20-{}", std::process::id()));
+            let n = NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!("pumpkin-a20-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&root).expect("container persist world folder");
             let folder = root.clone();
-            let (world, level) = runtime.block_on(async move { open_world(folder) });
+            let (world, level) =
+                runtime.block_on(async move { open_world(folder, autosave_ticks) });
             let probe = Self {
                 runtime,
                 world,
@@ -703,9 +705,10 @@ mod tests {
         }
     }
 
-    fn open_world(root: PathBuf) -> (Arc<World>, Arc<Level>) {
+    fn open_world(root: PathBuf, autosave_ticks: u64) -> (Arc<World>, Arc<Level>) {
         let config = LevelConfig {
             lighting: LightingEngineConfig::Full,
+            autosave_ticks,
             ..LevelConfig::default()
         };
         let dimension = Dimension::OVERWORLD.clone();
@@ -743,11 +746,7 @@ mod tests {
         Some((stack.get_item().id, stack.item_count))
     }
 
-    /// Placing into the live inventory used to leave the chunk snapshot empty, so a
-    /// reload after the window closed came back with nothing in it.
-    #[test]
-    fn chest_and_barrel_stacks_survive_dropping_the_live_entities() {
-        let probe = Probe::boot();
+    fn fill_containers(probe: &Probe) {
         probe.place(CHEST, Block::CHEST.default_state.id);
         probe.place(CHEST_OTHER_HALF, Block::CHEST.default_state.id);
         probe.place(BARREL, Block::BARREL.default_state.id);
@@ -765,6 +764,7 @@ mod tests {
         let (Some(right), Some(left)) = (right, left) else {
             return;
         };
+        // The chest window holds these same inventories.
         let double = DoubleInventory::new(right, left);
         double.on_open();
         double.set_stack(0, ItemStack::new(4, &Item::DIAMOND));
@@ -780,34 +780,59 @@ mod tests {
             ),
             "barrel should accept a stack"
         );
+    }
 
+    fn assert_saved_stacks(world: &Arc<World>) {
         assert_eq!(
-            read_slot(&probe.world, CHEST, 0),
-            Some((Item::DIAMOND.id, 4)),
-            "the chest still has the stack after the window closes"
-        );
-        assert_eq!(
-            read_slot(&probe.world, CHEST_OTHER_HALF, 0),
-            Some((Item::EMERALD.id, 2)),
-            "the other half of the double chest keeps its own stack"
-        );
-
-        probe.world.block_entities.clear();
-
-        assert_eq!(
-            read_slot(&probe.world, CHEST, 0),
+            read_slot(world, CHEST, 0),
             Some((Item::DIAMOND.id, 4)),
             "the chest stack should be in the chunk snapshot"
         );
         assert_eq!(
-            read_slot(&probe.world, CHEST_OTHER_HALF, 0),
+            read_slot(world, CHEST_OTHER_HALF, 0),
             Some((Item::EMERALD.id, 2)),
             "the other half should be in the chunk snapshot"
         );
         assert_eq!(
-            read_slot(&probe.world, BARREL, 0),
+            read_slot(world, BARREL, 0),
             Some((Item::OAK_PLANKS.id, 7)),
             "the barrel stack should be in the chunk snapshot"
         );
+    }
+
+    /// Chunk unload saves live block entities before it drops them.
+    #[test]
+    fn chunk_unload_keeps_chest_and_barrel_stacks() {
+        let probe = Probe::boot();
+        fill_containers(&probe);
+        probe.runtime.block_on(async {
+            probe
+                .world
+                .remove_entities_in_chunks([Vector2::new(0, 0)])
+                .await;
+        });
+        assert_saved_stacks(&probe.world);
+    }
+
+    /// `/save-all` and shutdown both run `World::save`, which copies live block
+    /// entities into the chunk before the chunk saver runs.
+    #[test]
+    fn world_save_keeps_chest_and_barrel_stacks() {
+        let probe = Probe::boot();
+        fill_containers(&probe);
+        probe.runtime.block_on(probe.world.save());
+        probe.world.block_entities.clear();
+        assert_saved_stacks(&probe.world);
+    }
+
+    /// Periodic autosave used to write the chunk without copying live inventories,
+    /// so a crash afterwards kept the empty chest from placement.
+    #[test]
+    fn autosave_keeps_chest_and_barrel_stacks() {
+        let probe = Probe::boot_with_autosave(1);
+        fill_containers(&probe);
+        probe.world.tick_environment();
+        probe.world.block_entities.clear();
+        assert_saved_stacks(&probe.world);
     }
 }

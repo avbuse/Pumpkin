@@ -7,7 +7,6 @@ use crate::block::{
     {BlockBehaviour, NormalUseArgs},
 };
 
-use crate::block::entities::BlockEntity;
 use crate::block::entities::barrel::BarrelBlockEntity;
 use crate::entity::EntityBase;
 use pumpkin_data::BlockStateId;
@@ -80,14 +79,12 @@ impl BlockBehaviour for BarrelBlock {
         args: GetScreenHandlerFactoryArgs<'_>,
     ) -> Option<Box<dyn ScreenHandlerFactory>> {
         let block_entity = args.world.get_block_entity(args.position)?;
-        block_entity.bind_world(args.world);
         let inventory = block_entity.get_inventory()?;
         Some(Box::new(BarrelScreenFactory(inventory)))
     }
 
     fn placed(&self, args: PlacedArgs<'_>) {
         let barrel_block_entity = BarrelBlockEntity::new(*args.position);
-        barrel_block_entity.bind_world(args.world);
         args.world.add_block_entity(Arc::new(barrel_block_entity));
     }
 

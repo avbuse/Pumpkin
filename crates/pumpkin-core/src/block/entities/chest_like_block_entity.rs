@@ -32,7 +32,6 @@ macro_rules! impl_block_entity_for_chest {
                     viewers: $crate::block::viewer::ViewerCountTracker::new(),
                     loot_table: StdMutex::new(loot_table_key),
                     loot_table_seed,
-                    bound_world: StdMutex::new(std::sync::Weak::new()),
                 };
 
                 // Only read saved items when there is no pending loot table.
@@ -77,25 +76,13 @@ macro_rules! impl_block_entity_for_chest {
                 }
             }
 
-            fn bind_world(&self, world: &Arc<$crate::world::World>) {
-                *self
-                    .bound_world
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    std::sync::Arc::downgrade(world);
-            }
-
             fn tick(&self, world: &Arc<$crate::world::World>) {
-                self.bind_world(world);
                 $crate::block::viewer::ViewerCountTrackerExt::update_viewer_count::<$struct_name>(
                     &self.viewers,
                     self,
                     world,
                     &self.position,
                 );
-                if self.is_dirty() {
-                    $crate::block::entities::persist_container(self, world);
-                }
             }
 
             fn get_inventory(self: Arc<Self>) -> Option<Arc<dyn pumpkin_inventory::Inventory>> {
@@ -233,14 +220,6 @@ macro_rules! impl_inventory_for_chest {
                 self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 self.comparator_dirty
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                let world = self
-                    .bound_world
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .upgrade();
-                if let Some(world) = world {
-                    $crate::block::entities::persist_container(self, &world);
-                }
             }
 
             fn as_any(&self) -> &dyn std::any::Any {
@@ -346,7 +325,6 @@ macro_rules! impl_chest_helper_methods {
                     viewers: $crate::block::viewer::ViewerCountTracker::new(),
                     loot_table: StdMutex::new(None),
                     loot_table_seed: 0,
-                    bound_world: StdMutex::new(std::sync::Weak::new()),
                 }
             }
 

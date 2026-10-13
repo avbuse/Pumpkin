@@ -67,6 +67,7 @@ pub mod vault;
 pub use furnace_like_block_entity::ExperienceContainer;
 pub use pumpkin_inventory::PropertyDelegate;
 
+//TODO: We need a mark_dirty for chests
 pub trait BlockEntity: Any + Send + Sync {
     fn write_nbt(&self, nbt: &mut NbtCompound);
     fn from_nbt(nbt: &NbtCompound, position: BlockPos) -> Self
@@ -158,40 +159,12 @@ pub trait BlockEntity: Any + Send + Sync {
     fn clear_comparator_dirty(&self) {}
 
     fn as_any(&self) -> &dyn Any;
-
-    /// Remembers the world that owns this entity.
-    ///
-    /// Container changes are copied into the chunk from that world. Loading a
-    /// chunk does not pass the world into `from_nbt`, so the first tick or the
-    /// screen that opens the container records it.
-    fn bind_world(&self, _world: &Arc<World>) {}
-
     fn to_property_delegate(self: Arc<Self>) -> Option<Arc<dyn PropertyDelegate>> {
         None
     }
     fn to_experience_container(self: Arc<Self>) -> Option<Arc<dyn ExperienceContainer>> {
         None
     }
-}
-
-/// Copies a container into the chunk's block-entity snapshot.
-///
-/// A chunk save writes that snapshot. The live inventory is a separate object,
-/// so a change has to be copied across or the next save keeps the old items.
-pub(crate) fn persist_container(entity: &dyn BlockEntity, world: &Arc<World>) {
-    let position = entity.get_position();
-    if !world.level.is_chunk_loaded(&position.chunk_position()) {
-        return;
-    }
-    let mut nbt = NbtCompound::new();
-    entity.write_internal(&mut nbt);
-    if let Some(custom) = world.custom_block_entity_data.get(&position)
-        && !custom.is_empty()
-    {
-        nbt.put_compound("PumpkinCustomData", custom.clone());
-    }
-    world.add_block_entity_nbt(position, &nbt);
-    entity.clear_dirty();
 }
 
 #[must_use]

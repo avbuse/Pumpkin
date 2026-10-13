@@ -1889,6 +1889,7 @@ impl World {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .tick();
 
+        let mut autosave_due = false;
         let (is_night, time_of_day) = {
             let mut level_time = self
                 .level_time
@@ -1926,12 +1927,28 @@ impl World {
             if self.level.autosave_ticks > 0 && self.level.save_enabled.load(Relaxed) {
                 let autosave = self.level.autosave_ticks as i64;
                 if autosave > 0 && level_time.world_age % autosave == 0 {
-                    self.level.should_save.store(true, Relaxed);
-                    self.level.level_channel.notify();
+                    autosave_due = true;
                 }
             }
             (level_time.is_night(), level_time.time_of_day)
         };
+
+        if autosave_due {
+            // Chunk saves write `pending_block_entities`. Live inventories are
+            // the source of truth until `save_block_entities` copies them, which
+            // `/save-all`, shutdown and chunk unload already do. Periodic
+            // autosave has to do it too, or a crash keeps the last snapshot.
+            let chunks: Vec<Vector2<i32>> = self
+                .block_entities
+                .iter()
+                .map(|chunk_block_entities| *chunk_block_entities.key())
+                .collect();
+            for chunk_pos in chunks {
+                self.save_block_entities(chunk_pos);
+            }
+            self.level.should_save.store(true, Relaxed);
+            self.level.level_channel.notify();
+        }
 
         let (should_reset_weather, weather_cycle_enabled) = {
             let mut weather = self

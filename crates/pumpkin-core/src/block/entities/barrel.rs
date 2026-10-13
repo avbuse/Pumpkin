@@ -7,7 +7,7 @@ use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::random::xoroshiro128::Xoroshiro;
 use pumpkin_util::random::{RandomImpl, get_seed};
 use std::any::Any;
-use std::sync::{RwLock, Weak};
+use std::sync::RwLock;
 use std::{
     array::from_fn,
     sync::{
@@ -16,7 +16,6 @@ use std::{
     },
 };
 
-use crate::block::entities::persist_container;
 use crate::block::viewer::{ViewerCountListener, ViewerCountTracker, ViewerCountTrackerExt};
 use crate::world::{BlockFlags, World};
 use pumpkin_inventory::{Clearable, Inventory, sync_write_items_to_nbt};
@@ -31,9 +30,6 @@ pub struct BarrelBlockEntity {
 
     // Viewer
     viewers: ViewerCountTracker,
-
-    /// World that should receive inventory snapshots. Weak so the world can own this entity.
-    bound_world: std::sync::Mutex<Weak<World>>,
 }
 
 impl BlockEntity for BarrelBlockEntity {
@@ -55,7 +51,6 @@ impl BlockEntity for BarrelBlockEntity {
             dirty: AtomicBool::new(false),
             comparator_dirty: AtomicBool::new(false),
             viewers: ViewerCountTracker::new(),
-            bound_world: std::sync::Mutex::new(Weak::new()),
         };
 
         pumpkin_inventory::sync_read_items_from_nbt(
@@ -73,20 +68,9 @@ impl BlockEntity for BarrelBlockEntity {
         self.write_inventory_nbt(nbt, true);
     }
 
-    fn bind_world(&self, world: &Arc<World>) {
-        *self
-            .bound_world
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(world);
-    }
-
     fn tick(&self, world: &Arc<World>) {
-        self.bind_world(world);
         self.viewers
             .update_viewer_count::<Self>(self, world, &self.position);
-        if self.is_dirty() {
-            persist_container(self, world);
-        }
     }
 
     fn get_inventory(self: Arc<Self>) -> Option<Arc<dyn Inventory>> {
@@ -146,7 +130,6 @@ impl BarrelBlockEntity {
             dirty: AtomicBool::new(false),
             comparator_dirty: AtomicBool::new(false),
             viewers: ViewerCountTracker::new(),
-            bound_world: std::sync::Mutex::new(Weak::new()),
         }
     }
 
@@ -254,14 +237,6 @@ impl Inventory for BarrelBlockEntity {
     fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Relaxed);
         self.comparator_dirty.store(true, Ordering::Relaxed);
-        let world = self
-            .bound_world
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .upgrade();
-        if let Some(world) = world {
-            persist_container(self, &world);
-        }
     }
 
     fn as_any(&self) -> &dyn Any {
