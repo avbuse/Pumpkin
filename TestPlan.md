@@ -1,10 +1,12 @@
 # Test plan: A-42 predicates
 
-Branch `core/A-42-predicates`. Confirm this branch before it is merged into `core-functionality` `70a0b846e`.
+Branch `core/A-42-predicates`. Confirm this branch before it is merged into `core-functionality` `f453f24a`.
 
 Predicate files are parsed as the same loot conditions the loader already uses. The three embedded vanilla predicates load: `minecraft:tool/can_silk_touch`, `minecraft:tool/can_shear`, `minecraft:block/fast_cooking`. `match_block` is supported, so `fast_cooking` must not warn. Only `data/<namespace>/predicate/` is loaded. `predicates/` is ignored. An unknown type logs a warning and the server stays up.
 
 Nothing in gameplay calls `get_predicate` yet. A-43 and A-44 are the callers. Block breaks still use the generated static loot tables, which already require Silk Touch for glass. A datapack loot table that references a predicate does not resolve it during a block break, because the lookup is unset. Do not expect this branch to change glass drops.
+
+Upstream `#4040` cooks a mob drop when the mob is on fire or dies to Fire Aspect. That uses the static loot condition, not `get_predicate`. A cooked drop is not a predicate failure, and it does not change the glass results in test 3.
 
 ## Setup
 
@@ -92,15 +94,14 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
 
 ## Where this branch sits
 
-Suggested merge order into `core-functionality` `70a0b846e`:
+Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on that core (`6b0d37545`), so it is not a remaining step:
 
 1. `core/A-45-worldgen-baseline` (docs only)
 2. `core/A-42-predicates` (datapacks, isolated from world save)
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
-5. `core/A-16-bed-spawn` (in-memory bed spawn)
-6. `core/A-06-player-data` (writes that spawn, and the rest of the player file)
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
 
 Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
 
