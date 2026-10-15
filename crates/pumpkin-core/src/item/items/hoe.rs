@@ -31,6 +31,11 @@ impl ItemBehaviour for HoeItem {
         block: &Block,
         _server: &Server,
     ) -> BlockActionResult {
+        // Adventure mode clears mayBuild, so tilling does not run.
+        if !player.may_build() {
+            return BlockActionResult::Pass;
+        }
+
         let world = player.world();
         let get_block = |dx: i8, dy: i8, dz: i8| {
             let check_pos = BlockPos(location.0 + Vector3::new(dx as i32, dy as i32, dz as i32));

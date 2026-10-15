@@ -502,6 +502,9 @@ pub mod dye_color;
 #[path = "generated/block_transformer.rs"]
 pub mod block_transformer;
 
+#[cfg(all(test, feature = "block_transformer"))]
+mod block_transformer_tests;
+
 #[cfg(feature = "trial_spawner")]
 #[rustfmt::skip]
 #[path = "generated/trial_spawner.rs"]

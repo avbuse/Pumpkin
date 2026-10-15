@@ -42,8 +42,11 @@ impl ItemBehaviour for ShovelItem {
         let mut changed = false;
         let mut damage = 1;
 
-        if let Some(result) =
-            SHOVEL.transform(block, world.get_block_state_id(&location), face, &get_block)
+        // Path making needs mayBuild. Campfire dousing is a block interaction and
+        // still runs in adventure mode.
+        if player.may_build()
+            && let Some(result) =
+                SHOVEL.transform(block, world.get_block_state_id(&location), face, &get_block)
         {
             if let Some(sound) = result.entry.sound {
                 world.play_sound(sound, SoundCategory::Blocks, &location.to_f64());
