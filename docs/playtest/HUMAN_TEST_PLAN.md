@@ -1,6 +1,6 @@
 # Human test plan
 
-Testers confirm each unmerged task branch before it is merged into `core-functionality` `70a0b846e` (`fix(gametest): pass the shared scoreboard into the redstone fixture`).
+Testers confirm each unmerged task branch before it is merged into `core-functionality` `f453f24a` (`Merge branch 'Pumpkin-MC:master' into core-functionality`). A-16 bed spawn is already on that core (`6b0d37545`). Do not treat `core/A-16-bed-spawn` as an open task.
 
 Use a licensed Java Edition **26.3** client. Protocol target on this tree is 26.3. Console-only steps are marked **Console**. Anything that needs the client is marked **Client**.
 
@@ -8,17 +8,17 @@ Check out one branch at a time, in its own scratch directory. Do not merge the b
 
 The copy the project host reads is `TestPlan.md` at the root of that task branch. This file is the combined list. The steps match.
 
-Each branch tip is a docs-only `TestPlan.md` commit. The checklist commit under it changes only `docs/playtest/<task>.md`.
+Each open branch tip is a docs commit on top of a merge of `core-functionality` `f453f24a`. The code and checklist commits under that merge are unchanged. Follow `TestPlan.md` on the branch if this combined list and that file ever disagree.
 
-| Branch | Code | Checklist | `TestPlan.md` |
+| Branch | Code | Checklist | Tip |
 | --- | --- | --- | --- |
-| `core/A-06-player-data` | `136e748bd` | `4b0865413` | `97828ec92` |
-| `core/A-16-bed-spawn` | `1650c9413` | `ed2bfe6e4` | `0b1b55a11` |
-| `core/A-20-container-persist` | `cf0f3dfd8` | `a37f7ce13` | `d75c8727a` |
-| `core/A-24-melee` | `b88bccbea` | `c2c0ea980` | `fe4cf7542` |
-| `core/A-42-predicates` | `62f37b12a` | `6744fae3d` | `46cee30b0` |
-| `core/A-45-worldgen-baseline` | `c2a34dcdc` | `62b41b555` | `6a2216b92` |
-| `core/A-48-chunk-5023` | `9af839d07` | `cfe488f87` | `74b58a647` |
+| `core/A-06-player-data` | `136e748bd` | `4b0865413` | `ce1e406b7` |
+| `core/A-16-bed-spawn` | `1650c9413` | `ed2bfe6e4` | merged as `6b0d37545` |
+| `core/A-20-container-persist` | `cf0f3dfd8` | `a37f7ce13` | `c64cc09ac` |
+| `core/A-24-melee` | `b88bccbea` | `c2c0ea980` | `b26788191` |
+| `core/A-42-predicates` | `62f37b12a` | `6744fae3d` | `faf16d98c` |
+| `core/A-45-worldgen-baseline` | `c2a34dcdc` | `62b41b555` | `45f97dcda` |
+| `core/A-48-chunk-5023` | `9af839d07` | `cfe488f87` | `fd7738efe` |
 
 ## Skipped
 
@@ -60,7 +60,7 @@ A survival player who logs out comes back with the same health, hunger, inventor
 
 Death item drops are existing behaviour and are not this task. `previousPlayerGameType` is still not updated by `/gamemode`. That is a separate gap. Do not fail this branch because F3+F4 has nothing to switch back to.
 
-Use a new world. One player, opped.
+Use a new world. One player, opped. Leave `hardcore` false. Upstream `#4041` sets a dead hardcore player to spectator after respawn, and A-06 then saves that gamemode. A hardcore world will not match A-06.4 and A-06.5.
 
 - [ ] **A-06.1 New player** (Client)
 
@@ -120,9 +120,23 @@ Use a new world. One player, opped.
   A hard kill during the logout save can truncate the `.dat`, because the file is written in place. If you only see the fresh-player result after `kill -9`, record it as the known in-place write gap and do not treat it as an A-06 field failure. A clean `stop` that does this is a fail.
   **Evidence:** the rejoin inventory and the log around startup.
 
+- [ ] **A-06.8 Daytime bed spawn survives stop** (Client)
+
+  A-16 is already on `core-functionality`, and this branch includes that core. Day, clear weather, standing next to an unoccupied bed. Right-click it.
+  Expect the action-bar line that you can only sleep at night, and a chat line that the respawn point was set. You stay standing.
+  `data get entity @s respawn`.
+  Expect `pos` on the bed head, `yaw`, `pitch`, and `forced` false. Expect no `angle` tag.
+  `stop`, start, rejoin. `data get entity @s respawn` again. Same compound.
+  `kill @s`. Expect to respawn at that bed.
+  **Fail:** the compound uses `angle` and omits `pitch`, the bed spawn is gone after `stop`, or death sends you to world spawn.
+  The A-16 section below says pitch is absent. That is the A-16 branch on its own. It does not apply on this A-06 tip.
+  **Evidence:** both `data get` transcripts and a screenshot of the respawn spot.
+
 ## A-16 bed spawn
 
-Branch `core/A-16-bed-spawn`. Code `1650c9413` (`fix(block): set the bed spawn before the night and monster checks`). Checklist `ed2bfe6e4`. `TestPlan.md` `0b1b55a11`.
+Branch `core/A-16-bed-spawn` is already merged into `core-functionality` as `6b0d37545`. The steps below describe that branch on its own. Do not playtest the old branch tip. Use A-06.8 on `core/A-06-player-data` for the bed plus the saved `respawn` compound.
+
+Code `1650c9413` (`fix(block): set the bed spawn before the night and monster checks`). Checklist `ed2bfe6e4`. `TestPlan.md` `0b1b55a11`.
 
 Right-click order on an overworld bed: explosion in the Nether and the End, then occupied, then too far, then a solid block above the bed, then the respawn write, then the night check, then the monster check. A daytime click and a monster click still set the spawn when the bed is in range and clear. Too far, obstructed, occupied, and an explosion do not.
 
@@ -233,6 +247,8 @@ The autosave log line is `Saving <N> chunks (collected from <M> holders)...`. Th
 
 The flush is every live block entity in the chunk, not only chests. A furnace in the same chunk is the regression check. Hoppers, shulker boxes, and lock/custom-name tags are not part of the acceptance.
 
+Upstream `#4016` keeps a spectator out of a chest whose loot table has not rolled. These steps use a survival player and a chest you fill yourself. A spectator refusal on an unrolled loot chest is that fix, not an empty save.
+
 - [ ] **A-20.1 Chest window** (Client)
 
   New world, opped. Place a chest. Put a stack of cobblestone in the first slot. Close it. Open it.
@@ -298,7 +314,9 @@ Branch `core/A-24-melee`. Code `b88bccbea` (`docs(review): add A-24 review notes
 
 Survival. No Strength or Weakness. Difficulty does not change player-to-mob melee damage. A wooden sword's full-charge hit is 4 damage (health 20 down to 16). The attack bar fills in about 13 ticks at 20 ticks per second. An immediate second click inside the hurt flash plays the no-damage sound and does not change health. A hit before the bar is full deals less than a full hit. Critical hits are a falling hit, not sprinting, not in water, not blind, not climbing, not riding, and multiply the sword damage by 1.5. Sweep requires a sword, a full bar, on the ground, not sprinting, and not a critical hit. Sweep damage with no Sweeping Edge ratio is 1. Marker armour stands are skipped. A sprint hit adds knockback, plays the knockback sound, and stops the sprint. Leather chest armour (3 points, 0 toughness) turns a 4-damage hit into 3.84, so health ends at 16.16. Sharpness I adds 1 at full charge (20 down to 15). A critical hit with Sharpness I ends at 13 and shows both critical particles. Switching the held item resets the attack bar. A landed hit adds a small hunger exhaustion; one hit will not show a lost shank. The attacker takes no damage.
 
-Sweeping Edge is the merge gate. Current core applies Sweeping Edge in the old attack code. This branch reads only the `sweeping_damage_ratio` attribute, and nothing applies the enchantment's attribute, so the ratio stays 0 and the sweep stays 1. That is a regression. **Do not merge this branch while A-24.8 fails.**
+Sweeping Edge is the merge gate. `core-functionality` `f453f24a` still applies Sweeping Edge in the old attack code. This branch reads only the `sweeping_damage_ratio` attribute, and nothing applies the enchantment's attribute, so the ratio stays 0 and the sweep stays 1. That is a regression. **Do not merge this branch while A-24.8 fails.**
+
+Upstream `#4040` cooks a mob drop when the mob is on fire or the weapon has Fire Aspect. A cooked drop is not an A-24 failure.
 
 26.3 mob equipment is the `equipment` compound. `ArmorItems` is not read.
 
@@ -389,6 +407,8 @@ Predicate files are parsed as the same loot conditions the loader already uses. 
 
 Nothing in gameplay calls `get_predicate` yet. A-43 and A-44 are the callers. Block breaks still use the generated static loot tables, which already require Silk Touch for glass. A datapack loot table that references a predicate does not resolve it during a block break, because the lookup is unset. Do not expect this branch to change glass drops.
 
+Upstream `#4040` cooks a mob drop when the mob is on fire or dies to Fire Aspect. That uses the static loot condition, not `get_predicate`. It does not change the glass results in A-42.3.
+
 - [ ] **A-42.1 Boot** (Console)
 
   Start in an empty directory. Wait for `Started server; took`.
@@ -447,9 +467,9 @@ Nothing in gameplay calls `get_predicate` yet. A-43 and A-44 are the callers. Bl
 
 Branch `core/A-45-worldgen-baseline`. Code `c2a34dcdc` (`docs(review): add A-45 review notes`). Checklist `62b41b555`. `TestPlan.md` `6a2216b92`.
 
-Documentation only. No generator, chunk format, or packet change. Terrain matches `core-functionality` at `70a0b846e` and does not match vanilla. The fixture counts are the measurement. The numbers live in `docs/compat/WORLDGEN_BASELINE.md`.
+Documentation only. No generator, chunk format, or packet change. Terrain matches `core-functionality` at `f453f24a`. `docs/compat/WORLDGEN_BASELINE.md` on the A-45 branch is the measurement taken on `70a0b846e`, before `b0c48b2d7` replaced the suite. Do not compare a new run to those old suite totals.
 
-A higher count is a regression even when the test still passes under its allowance (noise 6000, surface 7500, carvers 8000, per chunk).
+A higher count than A-45.2 is a regression even when the test still passes under its allowance (noise 6000, surface 7500, carvers 8000, per chunk).
 
 - [ ] **A-45.1 No Rust diff** (Console)
 
@@ -466,11 +486,17 @@ A higher count is a regression even when the test still passes under its allowan
   cargo test -j 2 -p pumpkin-world --lib generation::proto_chunk_test -- --nocapture --test-threads=2
   ```
 
-  This is a long quiet run. The recorded run finished in 289.81 seconds. Review saw about 8 minutes on 2 threads. A silent few minutes is the test working.
-  Expect `43 passed; 0 failed`. Expect suite totals noise 2, surface 2846, carvers 9122, and the same per-chunk cells as the baseline note. A missing `Total mismatches` line on a passing test means 0.
-  Feature totals in the same run (not a pass/fail gate): overworld 47135 (worst chunk 1995), nether 353478 (worst 11567), end 0.
-  **Fail:** any failed test, or any suite total above the note (noise above 2, surface above 2846, carvers above 9122).
-  **Evidence:** the final `passed` line and the three `Total mismatches` suite lines.
+  This is a long quiet run. A run on the updated A-45 tip finished in 196.46 seconds on 2 threads. A silent few minutes is the test working.
+  Expect `46 passed; 0 failed`. The old `43 passed` line and the 8x8 grid suite totals (noise 2, surface 2846, carvers 9122) belong to `70a0b846e`. Those grid tests are gone.
+  `count_dump_mismatches` still prints `[<name>] Total mismatches: N` only when `N > 0`. A passing test with no such line is 0. That run printed only:
+
+  - `no_blend_no_beard_carvers_7_4`: 9
+  - `no_blend_no_beard_surface_7_4`: 9
+  - `no_blend_no_beard_surface_13579_-6_11`: 56
+  - `no_blend_no_beard_surface_13579_-7_9`: 101
+
+  **Fail:** any failed test, any of those four counts going up, or a new `Total mismatches` line.
+  **Evidence:** the final `passed` line and every `Total mismatches` line.
 
 - [ ] **A-45.3 Boot** (Console)
 
@@ -498,7 +524,7 @@ This branch reads three block-state palette shapes and writes 5023:
 
 A default furnace (facing north, unlit) is a default state and is written as the block id. Oak stairs facing east are not. Biomes stay a string palette. Block-entity compounds are copied with their original tag types: furnace cook times, brewing numbers, and pot sherds are not rewritten. An unknown block id becomes air, with no log line. Lighting is copied, not recomputed.
 
-This branch's merge base with `core-functionality` is `50a0a2e6`, not `70a0b846e`. Time, weather, border, and scoreboard restore (A-05) are on core and are not on this branch. Do not fail A-48 because time or the scoreboard resets. `git diff --name-only` from that merge base shows the chunk format file does not overlap the later core commits, so the merge itself is the format change onto current core.
+This branch now includes `core-functionality` `f453f24a`, including A-05 time, weather, border, and scoreboard restore. A reset of those after `stop` is a fail. The chunk format file does not overlap the core commits after `50a0a2e6`. The 5023 writer on this branch is still this branch's change.
 
 Worlds outside data version 4435..5023 are rejected with `Unsupported world version`. 26.2 is 4903. 26.3 is 5023. Both are in range. Copy a world. Do not test against the only copy.
 
@@ -529,7 +555,7 @@ Worlds outside data version 4435..5023 are rejected with `Unsupported world vers
 
 - [ ] **A-48.4 A world saved by current core opens here, then in vanilla** (Client)
 
-  On `core-functionality` `70a0b846e`, new world, place oak stairs facing east, a furnace, and stone. `stop`.
+  On `core-functionality` `f453f24a`, new world, place oak stairs facing east, a furnace, and stone. `stop`.
   Copy that `world/` onto this branch. Start this branch and join.
   Expect those blocks, not air. Current core writes `Name` / `Properties` palettes labelled 5023, which this branch still reads.
   `stop` on this branch. Open that same world in vanilla 26.3.
@@ -544,27 +570,33 @@ Worlds outside data version 4435..5023 are rejected with `Unsupported world vers
   **Fail:** a panic while creating or saving the level.
   **Evidence:** the log.
 
+- [ ] **A-48.6 Time survives stop** (Console)
+
+  A-05 is on this branch. `time set 1000`, `stop`, start, `time query daytime`.
+  Expect about 1000, plus any ticks that passed before `stop`.
+  **Fail:** daytime back at the new-world value. Weather, the world border, and the scoreboard follow the same rule.
+  **Evidence:** the two query lines.
+
 ## Merge order
 
-File overlap between the branches: only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. Nothing else collides. A-48 does not touch a file that `core-functionality` changed after `50a0a2e6`.
+File overlap between the open branches: only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's chunk format file does not overlap the core commits after `50a0a2e6`. A-16 is already on `core-functionality`.
 
 Runtime interactions:
 
-- A-16 stores the bed in memory. A-06 writes that point into the `respawn` compound, including pitch. Merged together, a bed click must survive a restart.
+- A-16 is already on core. A-06 writes that bed point into the `respawn` compound, including pitch. On the current A-06 tip, a daytime bed click must survive a restart. That is A-06.8.
 - A-20 copies live block entities into the chunk snapshot. A-48 is the codec that then writes that chunk. A chest that survives A-20's kill must still be that chest, with its items, after A-48 writes the chunk, including when vanilla opens it.
-- A-45 changes no code. None of these branches change `proto_chunk_test` inputs. The baseline counts should hold after every merge. Re-run A-45.2 only if a merge actually touches `crates/pumpkin-world/src/generation/`.
+- A-45 changes no code. `b0c48b2d7` already replaced `proto_chunk_test`. The old suite totals do not apply. Re-run A-45.2 only if a later merge touches `crates/pumpkin-world/src/generation/`.
 - A-42 does not change chunk IO or player NBT. Glass drops must stay as in A-42.3 after the other merges.
 - A-24's attack path and A-06's NBT path share `player.rs`. Merge A-06 first, then rebase A-24 onto it and keep both: A-24's `attack` and A-06's save/load. A-24.8 (Sweeping Edge) is a fail on the branch as it stands. Rebase after that is fixed, or do not merge A-24.
 
-Suggested order:
+Suggested order into `core-functionality` `f453f24a`:
 
 1. `core/A-45-worldgen-baseline`. Docs only.
 2. `core/A-42-predicates`. Isolated from world save.
 3. `core/A-48-chunk-5023`. Chunk codec before the saves you want vanilla to read.
 4. `core/A-20-container-persist`. Autosave flush into the chunk A-48 writes.
-5. `core/A-16-bed-spawn`. In-memory bed spawn. No `player.rs` conflict.
-6. `core/A-06-player-data`. Persists the bed spawn and the rest of the player file.
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto the A-06 `player.rs`.
+5. `core/A-06-player-data`. Persists the bed spawn and the rest of the player file.
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto the A-06 `player.rs`.
 
 ### Combined smoke, after each merge that can interact
 
@@ -574,8 +606,8 @@ Run this on the integrated tree, one new world, one opped survival player. Mark 
 - [ ] **S.2 Glass** (Client). After A-42: normal pickaxe drops no glass, Silk Touch drops glass.
 - [ ] **S.3 Chunk round trip** (Client). After A-48: place oak stairs facing east and a stone block, `stop`, open the world in vanilla 26.3. No `Recoverable errors when loading section`. The stairs still face east.
 - [ ] **S.4 Chest through autosave** (Client). After A-20 and A-48: `autosave_ticks = 200`, cobblestone in a chest, coal in a furnace in the same chunk, stay there, wait for the Saving line, `kill -9`, start, both items remain. Then `stop` and open that world in vanilla 26.3: the chest block exists and the cobblestone is still in it.
-- [ ] **S.5 Bed, then player file** (Client). After A-16: daytime bed click sets `respawn` `pos` to the head and does not lie down. After A-06 as well: `stop`, start, `data get entity @s respawn` still has that `pos`, with `yaw` and `pitch` (not only `angle`). `kill @s` respawns at that bed, facing the yaw you had, with the pitch you had. Inventory you set before the restart is still there, and health you set with `damage @s 7` is still short.
+- [ ] **S.5 Bed, then player file** (Client). A-16 is already on core. On the current A-06 tip: daytime bed click sets `respawn` `pos` to the head and does not lie down. `stop`, start, `data get entity @s respawn` still has that `pos`, with `yaw` and `pitch` (not `angle`). `kill @s` respawns at that bed. Inventory you set before the restart is still there, and health you set with `damage @s 7` is still short.
 - [ ] **S.6 Melee after the player.rs rebase** (Client). After A-24 is rebased onto A-06: A-24.1 (wooden sword, health 16) and A-24.8 (Sweeping Edge III, second zombie loses more than 1). Then `stop` and rejoin: the sword is still in the hotbar (A-06) and a full-charge hit is still 4 (A-24).
-- [ ] **S.7 Worldgen count** (Console). Only if the merge touched `crates/pumpkin-world/src/generation/`. Otherwise record "not run, no generation diff". If you run it: noise 2, surface 2846, carvers 9122, 43 passed.
+- [ ] **S.7 Worldgen count** (Console). Only if a later merge touches `crates/pumpkin-world/src/generation/`. Otherwise record "not run, no generation diff". If you run it, use A-45.2: `46 passed; 0 failed`, and the four `Total mismatches` lines listed there. The old noise 2 / surface 2846 / carvers 9122 totals are the `70a0b846e` grids.
 
 **Fail the integrated tree** if any row that applies to the branches you merged fails. A failure in S.4 after both A-20 and A-48 means the autosave flush and the 5023 writer do not agree. A failure in S.5 after both A-16 and A-06 means the bed point is not the point that gets saved. A failure in S.6 means the `player.rs` rebase dropped either the attack path or the NBT path.
