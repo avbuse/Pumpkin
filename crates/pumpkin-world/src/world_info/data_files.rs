@@ -74,15 +74,62 @@ impl WorldGenSettingsData {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// One dimension clock inside `world_clocks.dat`.
+///
+/// `partial_tick`, `rate`, and `paused` are `None` when this writer only knows
+/// the tick count and must leave those tags already on disk alone.
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct DimensionClock {
     pub total_ticks: i64,
+    pub partial_tick: Option<f32>,
+    pub rate: Option<f32>,
+    pub paused: Option<bool>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+impl DimensionClock {
+    #[must_use]
+    pub const fn ticks(total_ticks: i64) -> Self {
+        Self {
+            total_ticks,
+            partial_tick: None,
+            rate: None,
+            paused: None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct WorldClocksData {
     pub clocks: std::collections::HashMap<String, DimensionClock>,
     pub data_version: i32,
+}
+
+/// One dimension's `world_border.dat` payload.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SavedBorder {
+    pub dimension: String,
+    pub center_x: f64,
+    pub center_z: f64,
+    pub size: f64,
+    pub lerp_target: f64,
+    pub lerp_time: i64,
+    pub damage_per_block: f64,
+    pub safe_zone: f64,
+    pub warning_blocks: i32,
+    pub warning_time: i32,
+}
+
+/// Live level state passed to one `write_world_info` call.
+///
+/// `None` means the writer keeps its previous behaviour for clocks, weather,
+/// and the scoreboard stub.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SavedLevelSnapshot {
+    pub world_age: i64,
+    pub clocks: Vec<(String, DimensionClock)>,
+    pub weather: WeatherData,
+    pub scoreboard: NbtCompound,
+    pub borders: Vec<SavedBorder>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -509,6 +556,22 @@ pub fn read_world_clocks(level_folder: &Path) -> WorldClocksData {
     }
 }
 
+fn existing_clock_data(path: &Path) -> NbtCompound {
+    if !path.exists() {
+        return NbtCompound::new();
+    }
+    let Ok(file) = File::open(path) else {
+        return NbtCompound::new();
+    };
+    match read_gzip_compound_tag(file) {
+        Ok(root) => root.get_compound("data").cloned().unwrap_or_default(),
+        Err(error) => {
+            warn!("Failed to read world_clocks.dat while saving clocks: {error}");
+            NbtCompound::new()
+        }
+    }
+}
+
 fn world_clocks_from_nbt(root: &NbtCompound) -> WorldClocksData {
     let mut result = WorldClocksData::default();
 
@@ -516,17 +579,25 @@ fn world_clocks_from_nbt(root: &NbtCompound) -> WorldClocksData {
         return result;
     };
 
-    result.data_version = inner.get_int("DataVersion").unwrap_or(0);
+    result.data_version = root
+        .get_int("DataVersion")
+        .or_else(|| inner.get_int("DataVersion"))
+        .unwrap_or(0);
 
     for (key, tag) in &inner.child_tags {
         if key.as_ref() == "DataVersion" {
             continue;
         }
         if let NbtTag::Compound(dim_compound) = tag {
-            let total_ticks = dim_compound.get_long("total_ticks").unwrap_or(0);
-            result
-                .clocks
-                .insert(key.to_string(), DimensionClock { total_ticks });
+            result.clocks.insert(
+                key.to_string(),
+                DimensionClock {
+                    total_ticks: dim_compound.get_long("total_ticks").unwrap_or(0),
+                    partial_tick: dim_compound.get_float("partial_tick"),
+                    rate: dim_compound.get_float("rate"),
+                    paused: dim_compound.get_bool("paused"),
+                },
+            );
         }
     }
 
@@ -540,15 +611,27 @@ pub fn write_world_clocks(
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("world_clocks.dat");
 
-    let mut inner = NbtCompound::new();
+    // `DataVersion` sits beside `data`, same as every other saved-data file.
+    // A copy left inside `data` is not a clock and a strict map codec rejects it.
+    let mut inner = existing_clock_data(&path);
+    inner.child_tags.remove("DataVersion");
     for (dim_name, clock) in &clocks.clocks {
-        let mut dim_compound = NbtCompound::new();
+        let mut dim_compound = inner.get_compound(dim_name).cloned().unwrap_or_default();
         dim_compound.put_long("total_ticks", clock.total_ticks);
+        if let Some(partial_tick) = clock.partial_tick {
+            dim_compound.put_float("partial_tick", partial_tick);
+        }
+        if let Some(rate) = clock.rate {
+            dim_compound.put_float("rate", rate);
+        }
+        if let Some(paused) = clock.paused {
+            dim_compound.put_bool("paused", paused);
+        }
         inner.put_compound(dim_name, dim_compound);
     }
-    inner.put_int("DataVersion", clocks.data_version);
 
     let mut root = NbtCompound::new();
+    root.put_int("DataVersion", clocks.data_version);
     root.put_compound("data", inner);
 
     let file = File::create(&path)?;
@@ -674,6 +757,58 @@ pub fn write_random_sequences_stub(
         .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
 }
 
+pub fn write_scoreboard(
+    level_folder: &Path,
+    data: &NbtCompound,
+    data_version: i32,
+) -> Result<(), WorldInfoError> {
+    let dir = ensure_minecraft_data_dir(level_folder)?;
+    let path = dir.join("scoreboard.dat");
+    let mut root = NbtCompound::new();
+    root.put_int("DataVersion", data_version);
+    root.put_compound("data", data.clone());
+    let file = File::create(&path)?;
+    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
+        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+}
+
+pub fn write_world_border(
+    level_folder: &Path,
+    border: &SavedBorder,
+    data_version: i32,
+) -> Result<(), WorldInfoError> {
+    let (namespace, name) = border
+        .dimension
+        .split_once(':')
+        .unwrap_or(("minecraft", border.dimension.as_str()));
+    let path = level_folder
+        .join("dimensions")
+        .join(namespace)
+        .join(name)
+        .join("data")
+        .join("minecraft")
+        .join("world_border.dat");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut data = NbtCompound::new();
+    data.put_double("center_x", border.center_x);
+    data.put_double("center_z", border.center_z);
+    data.put_double("damage_per_block", border.damage_per_block);
+    data.put_double("safe_zone", border.safe_zone);
+    data.put_int("warning_blocks", border.warning_blocks);
+    data.put_int("warning_time", border.warning_time);
+    data.put_double("size", border.size);
+    data.put_long("lerp_time", border.lerp_time);
+    data.put_double("lerp_target", border.lerp_target);
+    let mut root = NbtCompound::new();
+    root.put_int("DataVersion", data_version);
+    root.put_compound("data", data);
+    let file = File::create(&path)?;
+    pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
+        .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+}
+
 pub fn write_scoreboard_stub(level_folder: &Path, data_version: i32) -> Result<(), WorldInfoError> {
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("scoreboard.dat");
@@ -709,4 +844,60 @@ pub fn write_stopwatches_stub(
     let file = File::create(&path)?;
     pumpkin_nbt::nbt_compress::write_gzip_compound_tag(root, file)
         .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use pumpkin_nbt::nbt_compress::{read_gzip_compound_tag, write_gzip_compound_tag};
+    use tempfile::TempDir;
+
+    use super::{
+        DimensionClock, WorldClocksData, existing_clock_data, minecraft_data_dir,
+        write_world_clocks,
+    };
+
+    /// A clock file written with `DataVersion` inside `data` must come back with
+    /// that key beside `data`, and the clock's own fields must survive.
+    #[test]
+    fn clock_data_version_sits_beside_the_clock_map() {
+        let dir = TempDir::new().unwrap();
+        let path = minecraft_data_dir(dir.path()).join("world_clocks.dat");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let mut clock = pumpkin_nbt::compound::NbtCompound::new();
+        clock.put_long("total_ticks", 10);
+        clock.put_float("rate", 2.0);
+        clock.put_bool("paused", true);
+        let mut data = pumpkin_nbt::compound::NbtCompound::new();
+        data.put_int("DataVersion", 1);
+        data.put_compound("minecraft:overworld", clock);
+        let mut root = pumpkin_nbt::compound::NbtCompound::new();
+        root.put_compound("data", data);
+        write_gzip_compound_tag(root, File::create(&path).unwrap()).unwrap();
+
+        let mut clocks = WorldClocksData {
+            data_version: 4903,
+            ..WorldClocksData::default()
+        };
+        clocks.clocks.insert(
+            "minecraft:overworld".to_string(),
+            DimensionClock::ticks(18_000),
+        );
+        write_world_clocks(dir.path(), &clocks).unwrap();
+
+        let saved = read_gzip_compound_tag(File::open(&path).unwrap()).unwrap();
+        assert_eq!(saved.get_int("DataVersion"), Some(4903));
+        let data = saved.get_compound("data").unwrap();
+        assert!(
+            !data.child_tags.contains_key("DataVersion"),
+            "DataVersion must not stay inside the clock map"
+        );
+        let overworld = data.get_compound("minecraft:overworld").unwrap();
+        assert_eq!(overworld.get_long("total_ticks"), Some(18_000));
+        assert_eq!(overworld.get_float("rate"), Some(2.0));
+        assert_eq!(overworld.get_bool("paused"), Some(true));
+        assert!(existing_clock_data(&path).get_int("DataVersion").is_none());
+    }
 }
