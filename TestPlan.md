@@ -4,7 +4,7 @@ Branch `core/A-24-melee`. Confirm this branch before it is merged into `core-fun
 
 Survival. No Strength or Weakness. Difficulty does not change player-to-mob melee damage. A wooden sword's full-charge hit is 4 damage (health 20 down to 16). The attack bar fills in about 13 ticks at 20 ticks per second. An immediate second click inside the hurt flash plays the no-damage sound and does not change health. A hit before the bar is full deals less than a full hit. Critical hits are a falling hit, not sprinting, not in water, not blind, not climbing, not riding, and multiply the sword damage by 1.5. Sweep requires a sword, a full bar, on the ground, not sprinting, and not a critical hit. Sweep damage with no Sweeping Edge ratio is 1. Marker armour stands are skipped. A sprint hit adds knockback, plays the knockback sound, and stops the sprint. Leather chest armour (3 points, 0 toughness) turns a 4-damage hit into 3.84, so health ends at 16.16. Sharpness I adds 1 at full charge (20 down to 15). A critical hit with Sharpness I ends at 13 and shows both critical particles. Switching the held item resets the attack bar. A landed hit adds a small hunger exhaustion; one hit will not show a lost shank. The attacker takes no damage.
 
-Sweeping Edge is the merge gate. `core-functionality` `f453f24a` still applies Sweeping Edge in the old attack code. This branch reads only the `sweeping_damage_ratio` attribute, and nothing applies the enchantment's attribute, so the ratio stays 0 and the sweep stays 1. That is a regression. **Do not merge this branch while test 8 fails.**
+Sweeping Edge is the merge gate. The hit still reads only `sweeping_damage_ratio`. While a Sweeping Edge sword is in the main hand, the enchantment's attribute effect sets that ratio to `level / (level + 1)`. A full-charge wooden sword then deals 3, about 3.67, and 4 sweep damage at levels I, II, and III. Taking the sword out of the main hand removes the modifier, and the sweep goes back to 1. **Do not merge this branch while test 8 fails.**
 
 Upstream `#4040` cooks a mob drop when the mob is on fire or the weapon has Fire Aspect. That is loot, not the damage numbers in these steps. A cooked drop from a kill is not an A-24 failure.
 
@@ -98,8 +98,8 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
 
   Hold a wooden sword and `enchant @s sweeping_edge 3`. The tooltip must show Sweeping Edge III.
   Two fresh `NoAI` zombies within a block of each other, both at 20. Stand on the ground, do not sprint, full bar, hit one.
-  Expect the second zombie to lose **more than 1** health.
-  **Fail:** the second zombie loses exactly 1. That is the current code (the ratio stays 0). It is a regression against `core-functionality`, which still applies Sweeping Edge. The branch is not ready to merge.
+  Expect the second zombie to lose 4 health, so Health is 16. That is `1 + (3/4) * 4` on a full wooden-sword hit. Level I loses 3 (Health 17). Level II loses about 3.67 (Health about 16.33).
+  **Fail:** the second zombie loses exactly 1. The ratio was not applied.
   **Evidence:** the second zombie's Health. Write the number even when it fails.
 
 - [ ] **9. Item swap resets the bar** (Client)
@@ -128,8 +128,8 @@ Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on t
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
 5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
-6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+6. `core/A-24-melee` last, after Sweeping Edge III drops the second zombie to 16, rebased onto A-06
 
 Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
 
-This branch is step 7, last. Do not merge it while test 8 fails. It shares `player.rs` with A-06. Merge A-06 first, rebase this branch onto it, and keep both `attack` and A-06's save/load. After that rebase, test 1 still ends at health 16, test 8 still loses more than 1, and `stop` then rejoin still has the sword in the hotbar.
+This branch is step 7, last. Do not merge it while test 8 fails. It shares `player.rs` with A-06. Merge A-06 first, rebase this branch onto it, and keep both `attack` and A-06's save/load. After that rebase, test 1 still ends at health 16, test 8 still ends at 16 on the second zombie, and `stop` then rejoin still has the sword in the hotbar.
