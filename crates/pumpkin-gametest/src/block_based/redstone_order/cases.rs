@@ -14,6 +14,12 @@
 //!
 //! Facing on a repeater or comparator is the side it reads. The piston, observer, and
 //! dispenser facing values are the direction they push, watch, and shoot.
+//!
+//! Dust power is settled on tick 0, in the neighbour updates from the trigger. A line
+//! loses one power per dust, a branch continues from the junction at that same loss,
+//! and the dust 16 steps from a source stays at 0. Vertical links do the same when
+//! the block above the lower dust is not solid. Weak power does not cross a solid
+//! block. Strong power into that block is taken in full.
 
 use pumpkin_data::block_properties::{Facing, HorizontalFacing, ModeComparator};
 
@@ -115,6 +121,195 @@ fn dust_signal_stops_at_zero() -> Layout {
         cells.push(wire(at(x, 0, 0)));
     }
     cells.push(trigger(at(0, 0, 0), states::redstone_block()));
+    Layout { cells }
+}
+
+fn dust_climbs_onto_block() -> Layout {
+    // The upper dust sits on the stone east of the lower dust. Air above the lower dust lets it climb.
+    let source = at(0, 0, 0);
+    let lower = at(1, 0, 0);
+    let upper = at(2, 1, 0);
+    Layout {
+        cells: vec![
+            support(source),
+            support(lower),
+            support(upper),
+            wire(lower),
+            wire(upper),
+            trigger(source, states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_climb_blocked_by_solid() -> Layout {
+    // Stone directly above the lower dust stops the climb, so the upper dust stays dark.
+    let source = at(0, 0, 0);
+    let lower = at(1, 0, 0);
+    let upper = at(2, 1, 0);
+    let mut cap = placed(at(1, 1, 0), states::stone());
+    cap.notify = false;
+    Layout {
+        cells: vec![
+            support(source),
+            support(lower),
+            support(upper),
+            cap,
+            wire(lower),
+            wire(upper),
+            trigger(source, states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_drops_off_block() -> Layout {
+    // Air beside the upper dust lets the signal fall to the dust one block lower.
+    let source = at(0, 1, 0);
+    let upper = at(1, 1, 0);
+    let lower = at(2, 0, 0);
+    Layout {
+        cells: vec![
+            support(source),
+            support(upper),
+            support(lower),
+            wire(upper),
+            wire(lower),
+            trigger(source, states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_drop_blocked_by_solid() -> Layout {
+    // The block beside the lower dust is solid, and so is the block above that dust.
+    let source = at(0, 1, 0);
+    let upper = at(1, 1, 0);
+    let lower = at(2, 0, 0);
+    let mut cap = placed(at(2, 1, 0), states::stone());
+    cap.notify = false;
+    Layout {
+        cells: vec![
+            support(source),
+            support(upper),
+            support(lower),
+            cap,
+            wire(upper),
+            wire(lower),
+            trigger(source, states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_staircase_loses_one_per_step() -> Layout {
+    let source = at(0, 0, 0);
+    let step0 = at(1, 0, 0);
+    let step1 = at(2, 1, 0);
+    let step2 = at(3, 2, 0);
+    Layout {
+        cells: vec![
+            support(source),
+            support(step0),
+            support(step1),
+            support(step2),
+            wire(step0),
+            wire(step1),
+            wire(step2),
+            trigger(source, states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_weak_power_stops_at_solid() -> Layout {
+    // A redstone block only weakly powers the stone, so the far dust stays dark.
+    let source = at(0, 0, 0);
+    let solid = at(1, 0, 0);
+    let far = at(2, 0, 0);
+    Layout {
+        cells: vec![
+            support(source),
+            support(solid),
+            support(far),
+            placed(solid, states::stone()),
+            wire(far),
+            trigger(source, states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_reads_strong_power_through_solid() -> Layout {
+    // Facing east reads +X and strongly powers the stone on -X. Dust takes that full 15.
+    let dust_pos = at(0, 0, 0);
+    let solid = at(1, 0, 0);
+    let gate = at(2, 0, 0);
+    Layout {
+        cells: vec![
+            support(dust_pos),
+            support(solid),
+            support(gate),
+            placed(solid, states::stone()),
+            wire(dust_pos),
+            trigger(gate, states::repeater_powered(HorizontalFacing::East, 1)),
+        ],
+    }
+}
+
+fn dust_line_goes_dark_when_source_breaks() -> Layout {
+    let mut cells = Vec::new();
+    for x in 0..=4 {
+        cells.push(support(at(x, 0, 0)));
+    }
+    for x in 1..=4 {
+        cells.push(wire(at(x, 0, 0)));
+    }
+    cells.push(placed(at(0, 0, 0), states::redstone_block()));
+    cells.push(trigger(at(0, 0, 0), states::air()));
+    Layout { cells }
+}
+
+fn dust_takes_the_stronger_end() -> Layout {
+    // The west block is already in place. The east block is the trigger.
+    let mut cells = vec![support(at(0, 0, 0)), support(at(4, 0, 0))];
+    for x in 1..=3 {
+        cells.push(support(at(x, 0, 0)));
+        cells.push(wire(at(x, 0, 0)));
+    }
+    cells.push(placed(at(0, 0, 0), states::redstone_block()));
+    cells.push(trigger(at(4, 0, 0), states::redstone_block()));
+    Layout { cells }
+}
+
+fn dust_powered_from_above() -> Layout {
+    let dust_pos = at(0, 0, 0);
+    Layout {
+        cells: vec![
+            support(dust_pos),
+            wire(dust_pos),
+            trigger(at(0, 1, 0), states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_powered_from_below() -> Layout {
+    // The dust is placed on stone, then the stone is replaced by the source.
+    let dust_pos = at(0, 1, 0);
+    Layout {
+        cells: vec![
+            support(dust_pos),
+            wire(dust_pos),
+            trigger(at(0, 0, 0), states::redstone_block()),
+        ],
+    }
+}
+
+fn dust_break_in_the_middle_cuts_the_line() -> Layout {
+    // Power the line, then remove the dust at x=2. The far side has no source left.
+    let mut cells = Vec::new();
+    for x in 0..=4 {
+        cells.push(support(at(x, 0, 0)));
+    }
+    for x in 1..=4 {
+        cells.push(wire(at(x, 0, 0)));
+    }
+    cells.push(placed(at(0, 0, 0), states::redstone_block()));
+    cells.push(trigger(at(2, 0, 0), states::air()));
     Layout { cells }
 }
 
@@ -419,6 +614,164 @@ const DUST_STOPS: &[Sample] = &[
     Sample {
         tick: 0,
         pos: at(16, 0, 0),
+        signal: Signal::Dust(0),
+    },
+];
+
+const DUST_CLIMB: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 0, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 1, 0),
+        signal: Signal::Dust(14),
+    },
+];
+
+const DUST_CLIMB_BLOCKED: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 0, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 1, 0),
+        signal: Signal::Dust(0),
+    },
+];
+
+const DUST_DROP: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 1, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 0, 0),
+        signal: Signal::Dust(14),
+    },
+];
+
+const DUST_DROP_BLOCKED: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 1, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 0, 0),
+        signal: Signal::Dust(0),
+    },
+];
+
+const DUST_STAIR: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 0, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 1, 0),
+        signal: Signal::Dust(14),
+    },
+    Sample {
+        tick: 0,
+        pos: at(3, 2, 0),
+        signal: Signal::Dust(13),
+    },
+];
+
+const DUST_WEAK_STOPS: &[Sample] = &[Sample {
+    tick: 0,
+    pos: at(2, 0, 0),
+    signal: Signal::Dust(0),
+}];
+
+const DUST_STRONG_THROUGH: &[Sample] = &[Sample {
+    tick: 0,
+    pos: at(0, 0, 0),
+    signal: Signal::Dust(15),
+}];
+
+const DUST_GOES_DARK: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 0, 0),
+        signal: Signal::Dust(0),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 0, 0),
+        signal: Signal::Dust(0),
+    },
+    Sample {
+        tick: 0,
+        pos: at(3, 0, 0),
+        signal: Signal::Dust(0),
+    },
+    Sample {
+        tick: 0,
+        pos: at(4, 0, 0),
+        signal: Signal::Dust(0),
+    },
+];
+
+const DUST_STRONGER_END: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 0, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 0, 0),
+        signal: Signal::Dust(14),
+    },
+    Sample {
+        tick: 0,
+        pos: at(3, 0, 0),
+        signal: Signal::Dust(15),
+    },
+];
+
+const DUST_FROM_ABOVE: &[Sample] = &[Sample {
+    tick: 0,
+    pos: at(0, 0, 0),
+    signal: Signal::Dust(15),
+}];
+
+const DUST_FROM_BELOW: &[Sample] = &[Sample {
+    tick: 0,
+    pos: at(0, 1, 0),
+    signal: Signal::Dust(15),
+}];
+
+const DUST_CUT: &[Sample] = &[
+    Sample {
+        tick: 0,
+        pos: at(1, 0, 0),
+        signal: Signal::Dust(15),
+    },
+    Sample {
+        tick: 0,
+        pos: at(2, 0, 0),
+        signal: Signal::Block("air"),
+    },
+    Sample {
+        tick: 0,
+        pos: at(3, 0, 0),
+        signal: Signal::Dust(0),
+    },
+    Sample {
+        tick: 0,
+        pos: at(4, 0, 0),
         signal: Signal::Dust(0),
     },
 ];
@@ -793,10 +1146,98 @@ const CASES: &[RedstoneOrderCase] = &[
         ignored: None,
     },
     RedstoneOrderCase {
+        id: "dust_climbs_onto_block",
+        lane: RedstoneLane::Dust,
+        build: dust_climbs_onto_block,
+        expect: Expectation::samples(DUST_CLIMB),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_climb_blocked_by_solid",
+        lane: RedstoneLane::Dust,
+        build: dust_climb_blocked_by_solid,
+        expect: Expectation::samples(DUST_CLIMB_BLOCKED),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_drops_off_block",
+        lane: RedstoneLane::Dust,
+        build: dust_drops_off_block,
+        expect: Expectation::samples(DUST_DROP),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_drop_blocked_by_solid",
+        lane: RedstoneLane::Dust,
+        build: dust_drop_blocked_by_solid,
+        expect: Expectation::samples(DUST_DROP_BLOCKED),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_staircase_loses_one_per_step",
+        lane: RedstoneLane::Dust,
+        build: dust_staircase_loses_one_per_step,
+        expect: Expectation::samples(DUST_STAIR),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_weak_power_stops_at_solid",
+        lane: RedstoneLane::Dust,
+        build: dust_weak_power_stops_at_solid,
+        expect: Expectation::samples(DUST_WEAK_STOPS),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_reads_strong_power_through_solid",
+        lane: RedstoneLane::Dust,
+        build: dust_reads_strong_power_through_solid,
+        expect: Expectation::samples(DUST_STRONG_THROUGH),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_line_goes_dark_when_source_breaks",
+        lane: RedstoneLane::Dust,
+        build: dust_line_goes_dark_when_source_breaks,
+        expect: Expectation::samples(DUST_GOES_DARK),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_takes_the_stronger_end",
+        lane: RedstoneLane::Dust,
+        build: dust_takes_the_stronger_end,
+        expect: Expectation::samples(DUST_STRONGER_END),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_powered_from_above",
+        lane: RedstoneLane::Dust,
+        build: dust_powered_from_above,
+        expect: Expectation::samples(DUST_FROM_ABOVE),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_powered_from_below",
+        lane: RedstoneLane::Dust,
+        build: dust_powered_from_below,
+        expect: Expectation::samples(DUST_FROM_BELOW),
+        ignored: None,
+    },
+    RedstoneOrderCase {
+        id: "dust_break_in_the_middle_cuts_the_line",
+        lane: RedstoneLane::Dust,
+        build: dust_break_in_the_middle_cuts_the_line,
+        expect: Expectation::samples(DUST_CUT),
+        ignored: None,
+    },
+    RedstoneOrderCase {
         id: "repeater_four_tick_delay",
         lane: RedstoneLane::Repeater,
         build: repeater_four_tick_delay,
         expect: Expectation::samples(REPEATER_DELAY),
+        // A delay of N is stored at slot `offset + N`, and the next step consumes
+        // slot `offset`, so it runs on step N + 1. Vanilla runs it on step N.
+        // The same miss is on the comparator, observer, and dispenser rows.
+        // Dust does not schedule ticks. A-38 and A-41 own the fix.
         ignored: Some("repeater still unpowered at tick 8; it powers on tick 9"),
     },
     RedstoneOrderCase {

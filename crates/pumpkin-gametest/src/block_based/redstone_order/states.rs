@@ -24,6 +24,11 @@ pub fn redstone_block() -> BlockStateId {
 }
 
 #[must_use]
+pub fn air() -> BlockStateId {
+    Block::AIR.default_state.id
+}
+
+#[must_use]
 pub fn dust() -> BlockStateId {
     RedstoneWireLikeProperties::default(&Block::REDSTONE_WIRE).to_state_id(&Block::REDSTONE_WIRE)
 }
@@ -32,11 +37,21 @@ pub fn dust() -> BlockStateId {
 /// `delay` is the repeater's 1 to 4 setting.
 #[must_use]
 pub fn repeater(facing: HorizontalFacing, delay: u8) -> BlockStateId {
+    repeater_state(facing, delay, false)
+}
+
+/// A repeater that is already powered. Used as a strong-power source for dust.
+#[must_use]
+pub fn repeater_powered(facing: HorizontalFacing, delay: u8) -> BlockStateId {
+    repeater_state(facing, delay, true)
+}
+
+fn repeater_state(facing: HorizontalFacing, delay: u8, powered: bool) -> BlockStateId {
     let mut props = RepeaterLikeProperties::default(&Block::REPEATER);
     props.facing = facing;
     props.delay = delay;
     props.locked = false;
-    props.powered = false;
+    props.powered = powered;
     props.to_state_id(&Block::REPEATER)
 }
 
