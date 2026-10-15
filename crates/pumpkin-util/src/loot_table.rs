@@ -22,6 +22,9 @@ pub enum LootCondition {
         chances: &'static [f32],
     },
     AllOf(&'static [Self]),
+    AnyOf(&'static [Self]),
+    EntityOnFire,
+    DirectAttackerWeaponEnchantment(&'static str),
 }
 
 /// Bonus count formulas when tools have fortune or looting enchantments.
@@ -47,6 +50,7 @@ pub struct LootEntry {
     pub condition: LootCondition,
     /// Bonus formula to apply with fortune / looting (if any).
     pub bonus_formula: Option<LootBonusFormula>,
+    pub furnace_smelt: Option<LootCondition>,
 }
 
 /// One roll pool inside a loot table.
@@ -148,6 +152,8 @@ pub enum DynamicLootCondition {
     AnyOf(Vec<Self>),
     Inverted(Box<Self>),
     EntityProperties(EntityPredicate),
+    EntityOnFire,
+    DirectAttackerWeaponEnchantment(String),
     WeatherCheck {
         raining: Option<bool>,
         thundering: Option<bool>,
@@ -184,6 +190,13 @@ impl From<LootCondition> for DynamicLootCondition {
             },
             LootCondition::AllOf(conditions) => {
                 Self::AllOf(conditions.iter().copied().map(Self::from).collect())
+            }
+            LootCondition::AnyOf(conditions) => {
+                Self::AnyOf(conditions.iter().copied().map(Self::from).collect())
+            }
+            LootCondition::EntityOnFire => Self::EntityOnFire,
+            LootCondition::DirectAttackerWeaponEnchantment(tag) => {
+                Self::DirectAttackerWeaponEnchantment(tag.to_string())
             }
         }
     }
