@@ -1067,6 +1067,34 @@ mod tests {
         assert_eq!(hit.total_damage, 7.0);
     }
 
+    fn sweeping_edge_ratio(level: i32) -> f64 {
+        let effect = pumpkin_data::Enchantment::SWEEPING_EDGE
+            .effects
+            .attributes
+            .iter()
+            .find(|effect| {
+                effect.attribute == &pumpkin_data::attributes::Attributes::SWEEPING_DAMAGE_RATIO
+            })
+            .expect("sweeping edge writes sweeping_damage_ratio");
+        f64::from(effect.amount.calculate(level))
+    }
+
+    #[test]
+    fn sweeping_edge_second_target_damage_follows_the_attribute() {
+        // Full-charge wooden sword base is 4. The ratio is the enchantment's
+        // attribute amount, level / (level + 1). Second-target damage, before
+        // the victim's armor, is 1 + ratio * 4.
+        let first = sweeping_edge_ratio(1);
+        let second = sweeping_edge_ratio(2);
+        let third = sweeping_edge_ratio(3);
+        assert_eq!(first as f32, 0.5);
+        assert_eq!(second as f32, 2.0f32 / 3.0);
+        assert_eq!(third as f32, 0.75);
+        assert_eq!(sweep_damage(4.0, first), 3.0);
+        assert_eq!(sweep_damage(4.0, second), 1.0 + (2.0f32 / 3.0) * 4.0);
+        assert_eq!(sweep_damage(4.0, third), 4.0);
+    }
+
     #[test]
     fn sweep_damage_uses_only_the_sweeping_damage_ratio_attribute() {
         // The hit reads `sweeping_damage_ratio`. It does not add a level formula

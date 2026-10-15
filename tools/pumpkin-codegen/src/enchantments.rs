@@ -1,11 +1,12 @@
 use std::{collections::BTreeMap, fs};
 
 use heck::{ToPascalCase, ToShoutySnakeCase};
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::TextContent::Translate;
 use quote::{format_ident, quote};
 use serde::Deserialize;
+use syn::LitStr;
 
 /// Raw deserialization shape for a single enchantment entry from `enchantment/*.json`.
 #[derive(Deserialize)]
@@ -997,6 +998,57 @@ fn parse_single_replace_disk_predicate(v: &serde_json::Value) -> TokenStream {
     }
 }
 
+fn parse_attribute_effects(val: Option<&serde_json::Value>) -> TokenStream {
+    let effects: Vec<TokenStream> = val
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|item| {
+                    let obj = item.as_object().expect("attribute effect");
+                    let id = LitStr::new(
+                        obj.get("id")
+                            .and_then(|id| id.as_str())
+                            .expect("attribute id"),
+                        Span::call_site(),
+                    );
+                    let attribute = obj
+                        .get("attribute")
+                        .and_then(|attribute| attribute.as_str())
+                        .expect("attribute name");
+                    let attribute = format_ident!(
+                        "{}",
+                        attribute
+                            .strip_prefix("minecraft:")
+                            .unwrap_or(attribute)
+                            .to_shouty_snake_case()
+                    );
+                    let operation = match obj
+                        .get("operation")
+                        .and_then(|operation| operation.as_str())
+                        .expect("attribute operation")
+                    {
+                        "add_value" => quote! { Operation::AddValue },
+                        "add_multiplied_base" => quote! { Operation::AddMultipliedBase },
+                        "add_multiplied_total" => quote! { Operation::AddMultipliedTotal },
+                        other => panic!("unknown enchantment attribute operation {other}"),
+                    };
+                    let amount =
+                        parse_level_based_value(obj.get("amount").expect("attribute amount"));
+                    quote! {
+                        EnchantmentAttributeEffect {
+                            id: #id,
+                            attribute: &Attributes::#attribute,
+                            operation: #operation,
+                            amount: #amount,
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    quote! { &[#(#effects),*] }
+}
+
 fn parse_optional_value_effect(val: Option<&serde_json::Value>) -> TokenStream {
     if let Some(v) = val {
         let eff = v.get("effect").unwrap_or(v);
@@ -1119,6 +1171,7 @@ pub fn build() -> TokenStream {
             parse_conditional_entity_effects(effects_map.get("minecraft:location_changed"));
         let prevent_armor_change = effects_map.contains_key("minecraft:prevent_armor_change");
         let prevent_equipment_drop = effects_map.contains_key("minecraft:prevent_equipment_drop");
+        let attributes = parse_attribute_effects(effects_map.get("minecraft:attributes"));
 
         let effects_tokens = quote! {
             EnchantmentEffects {
@@ -1147,6 +1200,7 @@ pub fn build() -> TokenStream {
                 location_changed: #location_changed,
                 prevent_armor_change: #prevent_armor_change,
                 prevent_equipment_drop: #prevent_equipment_drop,
+                attributes: #attributes,
             }
         };
 
@@ -1235,7 +1289,9 @@ pub fn build() -> TokenStream {
         use crate::tag::DamageType as DamageTypeTag;
         use crate::tag::EntityType as EntityTypeTag;
         use crate::tag::{RegistryKey, Tag, Taggable};
+        use crate::attributes::Attributes;
         use crate::data_component_impl::EnchantmentsImpl;
+        use crate::data_component_impl::Operation;
         use pumpkin_util::text::TextComponent;
         use pumpkin_util::text::color::NamedColor;
         use std::hash::{Hash, Hasher};
@@ -1576,6 +1632,16 @@ pub fn build() -> TokenStream {
             }
         }
 
+        /// One `minecraft:attributes` entry. The amount is evaluated at the
+        /// enchantment level and added while the item is in a matching slot.
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct EnchantmentAttributeEffect {
+            pub id: &'static str,
+            pub attribute: &'static Attributes,
+            pub operation: Operation,
+            pub amount: LevelBasedValue,
+        }
+
         #[derive(Clone, Debug)]
         pub struct EnchantmentEffects {
             pub projectile_spawned: &'static [ConditionalEffect<EnchantmentEntityEffect>],
@@ -1603,6 +1669,7 @@ pub fn build() -> TokenStream {
             pub location_changed: &'static [ConditionalEffect<EnchantmentEntityEffect>],
             pub prevent_armor_change: bool,
             pub prevent_equipment_drop: bool,
+            pub attributes: &'static [EnchantmentAttributeEffect],
         }
 
         pub struct Enchantment {

@@ -611,29 +611,36 @@ impl LivingEntity {
         if stack.is_empty() {
             return;
         }
-        let Some(modifiers) = stack.get_data_component::<AttributeModifiersImpl>() else {
-            return;
-        };
 
         let mut applied = Vec::new();
-        for item_mod in modifiers.attribute_modifiers.iter() {
-            if !attribute_modifier_slot_matches(&item_mod.slot, slot) {
-                continue;
-            }
-            let operation = match item_mod.operation {
-                Operation::AddValue => ModifierOperation::Add,
-                Operation::AddMultipliedBase => ModifierOperation::MultiplyBase,
-                Operation::AddMultipliedTotal => ModifierOperation::MultiplyTotal,
-            };
-            self.update_attribute(item_mod.r#type, |inst| {
-                inst.add_or_replace_modifier(Modifier {
-                    id: item_mod.id.to_string(),
-                    amount: item_mod.amount,
-                    operation,
+        if let Some(modifiers) = stack.get_data_component::<AttributeModifiersImpl>() {
+            for item_mod in modifiers.attribute_modifiers.iter() {
+                if !attribute_modifier_slot_matches(&item_mod.slot, slot) {
+                    continue;
+                }
+                let operation = match item_mod.operation {
+                    Operation::AddValue => ModifierOperation::Add,
+                    Operation::AddMultipliedBase => ModifierOperation::MultiplyBase,
+                    Operation::AddMultipliedTotal => ModifierOperation::MultiplyTotal,
+                };
+                self.update_attribute(item_mod.r#type, |inst| {
+                    inst.add_or_replace_modifier(Modifier {
+                        id: item_mod.id.to_string(),
+                        amount: item_mod.amount,
+                        operation,
+                    });
                 });
+                applied.push((item_mod.r#type.id, item_mod.id.to_string()));
+                push_unique_attribute(touched, item_mod.r#type);
+            }
+        }
+
+        for (attribute, modifier) in enchantment_attribute_modifiers(stack, slot) {
+            self.update_attribute(attribute, |inst| {
+                inst.add_or_replace_modifier(modifier.clone());
             });
-            applied.push((item_mod.r#type.id, item_mod.id.to_string()));
-            push_unique_attribute(touched, item_mod.r#type);
+            applied.push((attribute.id, modifier.id));
+            push_unique_attribute(touched, attribute);
         }
 
         if !applied.is_empty() {
@@ -3838,6 +3845,43 @@ fn random_teleport_coordinate(center: f64, diameter: f32, random: f64) -> f64 {
     center + (random - 0.5) * f64::from(diameter)
 }
 
+/// Attribute modifiers from the stack's enchantments whose slots include
+/// `slot`. The previous call's ids are removed by the equipment update, so a
+/// swap or an empty hand drops them.
+fn enchantment_attribute_modifiers(
+    stack: &ItemStack,
+    slot: &EquipmentSlot,
+) -> Vec<(&'static Attributes, Modifier)> {
+    let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() else {
+        return Vec::new();
+    };
+    let mut applied = Vec::new();
+    for (enchantment, level) in enchantments.enchantment.iter() {
+        let slot_matches = enchantment
+            .slots
+            .iter()
+            .any(|enchantment_slot| attribute_modifier_slot_matches(enchantment_slot, slot));
+        if !slot_matches {
+            continue;
+        }
+        for effect in enchantment.effects.attributes {
+            applied.push((
+                effect.attribute,
+                Modifier {
+                    id: effect.id.to_string(),
+                    amount: f64::from(effect.amount.calculate(*level)),
+                    operation: match effect.operation {
+                        Operation::AddValue => ModifierOperation::Add,
+                        Operation::AddMultipliedBase => ModifierOperation::MultiplyBase,
+                        Operation::AddMultipliedTotal => ModifierOperation::MultiplyTotal,
+                    },
+                },
+            ));
+        }
+    }
+    applied
+}
+
 fn attributes_by_id(id: u8) -> Option<&'static Attributes> {
     Attributes::ALL.iter().find(|attr| attr.id == id)
 }
@@ -4124,5 +4168,39 @@ mod tests {
         assert_eq!(merged[0].amount, 3.0);
         assert_eq!(merged[1].id, "minecraft:base_attack_damage");
         assert_eq!(merged[1].amount, 6.0);
+    }
+
+    #[test]
+    fn sweeping_edge_attribute_is_only_on_the_main_hand() {
+        use std::borrow::Cow;
+
+        let mut sword = ItemStack::new(1, &Item::WOODEN_SWORD);
+        sword.set_data_component(EnchantmentsImpl {
+            enchantment: Cow::Owned(vec![(&Enchantment::SWEEPING_EDGE, 3)]),
+        });
+        let main = enchantment_attribute_modifiers(&sword, &EquipmentSlot::MAIN_HAND);
+        assert_eq!(main.len(), 1);
+        assert_eq!(main[0].0, &Attributes::SWEEPING_DAMAGE_RATIO);
+        assert_eq!(main[0].1.id, "minecraft:enchantment.sweeping_edge");
+        assert_eq!(main[0].1.operation, ModifierOperation::Add);
+        assert_eq!(main[0].1.amount, f64::from(0.75f32));
+
+        assert!(enchantment_attribute_modifiers(&sword, &EquipmentSlot::OFF_HAND).is_empty());
+        let plain = ItemStack::new(1, &Item::WOODEN_SWORD);
+        assert!(enchantment_attribute_modifiers(&plain, &EquipmentSlot::MAIN_HAND).is_empty());
+        assert!(
+            enchantment_attribute_modifiers(ItemStack::EMPTY, &EquipmentSlot::MAIN_HAND).is_empty()
+        );
+
+        sword.set_data_component(EnchantmentsImpl {
+            enchantment: Cow::Owned(vec![(&Enchantment::SWEEPING_EDGE, 1)]),
+        });
+        let first = enchantment_attribute_modifiers(&sword, &EquipmentSlot::MAIN_HAND);
+        assert_eq!(first[0].1.amount, f64::from(0.5f32));
+        sword.set_data_component(EnchantmentsImpl {
+            enchantment: Cow::Owned(vec![(&Enchantment::SWEEPING_EDGE, 2)]),
+        });
+        let second = enchantment_attribute_modifiers(&sword, &EquipmentSlot::MAIN_HAND);
+        assert_eq!(second[0].1.amount, f64::from(2.0f32 / 3.0));
     }
 }

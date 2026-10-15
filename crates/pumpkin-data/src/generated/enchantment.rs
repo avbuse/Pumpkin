@@ -1,5 +1,7 @@
 /* This file is generated. Do not edit manually. */
+use crate::attributes::Attributes;
 use crate::data_component_impl::EnchantmentsImpl;
+use crate::data_component_impl::Operation;
 use crate::item::Item;
 use crate::tag::DamageType as DamageTypeTag;
 use crate::tag::Enchantment as EnchantmentTag;
@@ -321,6 +323,15 @@ impl EnchantmentValueEffect {
         }
     }
 }
+#[doc = r" One `minecraft:attributes` entry. The amount is evaluated at the"]
+#[doc = r" enchantment level and added while the item is in a matching slot."]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnchantmentAttributeEffect {
+    pub id: &'static str,
+    pub attribute: &'static Attributes,
+    pub operation: Operation,
+    pub amount: LevelBasedValue,
+}
 #[derive(Clone, Debug)]
 pub struct EnchantmentEffects {
     pub projectile_spawned: &'static [ConditionalEffect<EnchantmentEntityEffect>],
@@ -348,6 +359,7 @@ pub struct EnchantmentEffects {
     pub location_changed: &'static [ConditionalEffect<EnchantmentEntityEffect>],
     pub prevent_armor_change: bool,
     pub prevent_equipment_drop: bool,
+    pub attributes: &'static [EnchantmentAttributeEffect],
 }
 pub struct Enchantment {
     pub id: u8,
@@ -509,6 +521,15 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.aqua_affinity",
+                attribute: &Attributes::SUBMERGED_MINING_SPEED,
+                operation: Operation::AddMultipliedTotal,
+                amount: LevelBasedValue::Linear {
+                    base: 4f32,
+                    per_level_above_first: 4f32,
+                },
+            }],
         },
     };
     pub const BANE_OF_ARTHROPODS: Self = Self {
@@ -575,6 +596,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const BINDING_CURSE: Self = Self {
@@ -623,6 +645,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: true,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const BLAST_PROTECTION: Self = Self {
@@ -676,6 +699,15 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.blast_protection",
+                attribute: &Attributes::EXPLOSION_KNOCKBACK_RESISTANCE,
+                operation: Operation::AddValue,
+                amount: LevelBasedValue::Linear {
+                    base: 0.15f32,
+                    per_level_above_first: 0.15f32,
+                },
+            }],
         },
     };
     pub const BREACH: Self = Self {
@@ -729,6 +761,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const CHANNELING: Self = Self {
@@ -799,6 +832,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const DENSITY: Self = Self {
@@ -852,6 +886,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const DEPTH_STRIDER: Self = Self {
@@ -900,6 +935,15 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.depth_strider",
+                attribute: &Attributes::WATER_MOVEMENT_EFFICIENCY,
+                operation: Operation::AddValue,
+                amount: LevelBasedValue::Linear {
+                    base: 0.33333334f32,
+                    per_level_above_first: 0.33333334f32,
+                },
+            }],
         },
     };
     pub const EFFICIENCY: Self = Self {
@@ -948,6 +992,12 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.efficiency",
+                attribute: &Attributes::MINING_EFFICIENCY,
+                operation: Operation::AddValue,
+                amount: LevelBasedValue::LevelsSquared { added: 1f32 },
+            }],
         },
     };
     pub const FEATHER_FALLING: Self = Self {
@@ -1001,6 +1051,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const FIRE_ASPECT: Self = Self {
@@ -1058,6 +1109,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const FIRE_PROTECTION: Self = Self {
@@ -1111,6 +1163,15 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.fire_protection",
+                attribute: &Attributes::BURNING_TIME,
+                operation: Operation::AddMultipliedBase,
+                amount: LevelBasedValue::Linear {
+                    base: -0.15f32,
+                    per_level_above_first: -0.15f32,
+                },
+            }],
         },
     };
     pub const FLAME: Self = Self {
@@ -1163,6 +1224,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const FORTUNE: Self = Self {
@@ -1211,6 +1273,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const FROST_WALKER: Self = Self {
@@ -1291,6 +1354,7 @@ impl Enchantment {
             }],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const IMPALING: Self = Self {
@@ -1344,6 +1408,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const INFINITY: Self = Self {
@@ -1394,6 +1459,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const KNOCKBACK: Self = Self {
@@ -1447,6 +1513,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const LOOTING: Self = Self {
@@ -1502,6 +1569,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const LOYALTY: Self = Self {
@@ -1555,6 +1623,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const LUCK_OF_THE_SEA: Self = Self {
@@ -1608,6 +1677,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const LUNGE: Self = Self {
@@ -1656,6 +1726,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const LURE: Self = Self {
@@ -1709,6 +1780,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const MENDING: Self = Self {
@@ -1759,6 +1831,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const MULTISHOT: Self = Self {
@@ -1817,6 +1890,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const PIERCING: Self = Self {
@@ -1870,6 +1944,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const POWER: Self = Self {
@@ -1923,6 +1998,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const PROJECTILE_PROTECTION: Self = Self {
@@ -1976,6 +2052,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const PROTECTION: Self = Self {
@@ -2029,6 +2106,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const PUNCH: Self = Self {
@@ -2082,6 +2160,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const QUICK_CHARGE: Self = Self {
@@ -2136,6 +2215,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const RESPIRATION: Self = Self {
@@ -2184,6 +2264,15 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.respiration",
+                attribute: &Attributes::OXYGEN_BONUS,
+                operation: Operation::AddValue,
+                amount: LevelBasedValue::Linear {
+                    base: 1f32,
+                    per_level_above_first: 1f32,
+                },
+            }],
         },
     };
     pub const RIPTIDE: Self = Self {
@@ -2237,6 +2326,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const SHARPNESS: Self = Self {
@@ -2290,6 +2380,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const SILK_TOUCH: Self = Self {
@@ -2340,6 +2431,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const SMITE: Self = Self {
@@ -2393,6 +2485,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const SOUL_SPEED: Self = Self {
@@ -2453,6 +2546,7 @@ impl Enchantment {
             ],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const SWEEPING_EDGE: Self = Self {
@@ -2501,6 +2595,21 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.sweeping_edge",
+                attribute: &Attributes::SWEEPING_DAMAGE_RATIO,
+                operation: Operation::AddValue,
+                amount: LevelBasedValue::Fraction {
+                    numerator: &LevelBasedValue::Linear {
+                        base: 1f32,
+                        per_level_above_first: 1f32,
+                    },
+                    denominator: &LevelBasedValue::Linear {
+                        base: 2f32,
+                        per_level_above_first: 1f32,
+                    },
+                },
+            }],
         },
     };
     pub const SWIFT_SNEAK: Self = Self {
@@ -2549,6 +2658,15 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[EnchantmentAttributeEffect {
+                id: "minecraft:enchantment.swift_sneak",
+                attribute: &Attributes::SNEAKING_SPEED,
+                operation: Operation::AddValue,
+                amount: LevelBasedValue::Linear {
+                    base: 0.15f32,
+                    per_level_above_first: 0.15f32,
+                },
+            }],
         },
     };
     pub const THORNS: Self = Self {
@@ -2610,6 +2728,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const UNBREAKING: Self = Self {
@@ -2683,6 +2802,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub const VANISHING_CURSE: Self = Self {
@@ -2731,6 +2851,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: true,
+            attributes: &[],
         },
     };
     pub const WIND_BURST: Self = Self {
@@ -2803,6 +2924,7 @@ impl Enchantment {
             location_changed: &[],
             prevent_armor_change: false,
             prevent_equipment_drop: false,
+            attributes: &[],
         },
     };
     pub fn from_name(name: &str) -> Option<&'static Self> {
