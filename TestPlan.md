@@ -1,12 +1,12 @@
 # Test plan: A-06 player data
 
-Branch `core/A-06-player-data`. Confirm this branch before it is merged into `core-functionality` `70a0b846e`.
+Branch `core/A-06-player-data`. Confirm this branch before it is merged into `core-functionality` `f453f24a`. That core already includes A-16 bed spawn (`6b0d37545`).
 
 A survival player who logs out comes back with the same health, hunger, inventory, spawn point, and gamemode. The branch writes the 26.3 `respawn` compound (`dimension`, `pos`, `yaw`, `pitch`, `forced`). Yaw is wrapped into -180..180 on write (270 becomes -90, 180 becomes -180). Pitch is clamped to -90..90 (120 becomes 90). Legacy `SpawnX` / `SpawnY` / `SpawnZ` / `SpawnAngle` / `SpawnDimension` / `SpawnForced` are read from old files and are not written. Old Pumpkin files that stored `respawn.angle` still load that value as yaw.
 
 Death item drops are existing behaviour and are not this task. `previousPlayerGameType` is still not updated by `/gamemode`. Do not fail this branch because F3+F4 has nothing to switch back to.
 
-Use a new world. One player, opped.
+Use a new world. One player, opped. Leave `hardcore` false. Upstream `#4041` sets a dead hardcore player to spectator after respawn, and this branch then saves that gamemode. A hardcore world will not match tests 4 and 5.
 
 ## Setup
 
@@ -96,20 +96,31 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
   A hard kill during the logout save can truncate the `.dat`, because the file is written in place. If you only see the fresh-player result after `kill -9`, record it as the known in-place write gap and do not treat it as an A-06 field failure. A clean `stop` that does this is a fail.
   **Evidence:** the rejoin inventory and the log around startup.
 
+- [ ] **8. Daytime bed spawn survives stop** (Client)
+
+  A-16 is already on this branch. Day, clear weather, standing next to an unoccupied bed. Right-click it.
+  Expect the action-bar line that you can only sleep at night, and a chat line that the respawn point was set. You stay standing.
+  `data get entity @s respawn`.
+  Expect `pos` on the bed head, `yaw`, `pitch`, and `forced` false. Expect no `angle` tag.
+  `stop`, start, rejoin. `data get entity @s respawn` again. Same compound.
+  `kill @s`. Expect to respawn at that bed, with the inventory and the short health from tests 2 and 3 if you still have them.
+  **Fail:** the compound uses `angle` and omits `pitch`, the bed spawn is gone after `stop`, or death sends you to world spawn.
+  `docs/playtest/A-16.md` says pitch is absent and yaw is stored as `angle`. That note is the A-16 branch on its own. It does not apply on this branch.
+  **Evidence:** both `data get` transcripts and a screenshot of the respawn spot.
+
 ## Where this branch sits
 
-Suggested merge order into `core-functionality` `70a0b846e`:
+Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on that core (`6b0d37545`), so it is not a remaining step:
 
 1. `core/A-45-worldgen-baseline` (docs only)
 2. `core/A-42-predicates` (datapacks, isolated from world save)
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
-5. `core/A-16-bed-spawn` (in-memory bed spawn)
-6. `core/A-06-player-data` (writes that spawn, and the rest of the player file)
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
 
 Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
 
-This branch is step 6. A-16 sets the bed in memory. This branch is what writes that point, including pitch. After both are merged, a daytime bed click must survive `stop`: `data get entity @s respawn` still has the bed head, with `yaw` and `pitch`, and `kill @s` respawns there with the inventory and the short health from tests 2 and 3.
+This branch already contains A-16. Test 8 is the bed check. A daytime bed click must survive `stop`: `data get entity @s respawn` still has the bed head, with `yaw` and `pitch`, and `kill @s` respawns there.
 
 A-24 also edits `player.rs`. Merge this branch first. Rebase A-24 onto it and keep both this save/load path and A-24's `attack`. After that rebase, a full-charge wooden sword still drops a zombie from 20 to 16, and the sword is still in the hotbar after `stop`.
