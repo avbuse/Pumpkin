@@ -1,12 +1,14 @@
 # Test plan: A-20 container persistence
 
-Branch `core/A-20-container-persist`. Confirm this branch before it is merged into `core-functionality` `70a0b846e`.
+Branch `core/A-20-container-persist`. Confirm this branch before it is merged into `core-functionality` `f453f24a`.
 
 Closing a chest or barrel only updates the live inventory. The chunk snapshot is written when the chunk unloads, when you `save-all`, when you `stop`, and on the periodic autosave. Before this branch the autosave set the save flag without copying live block entities, so a crash after the autosave line could store an empty chest while the chunk stayed loaded.
 
 The autosave log line is `Saving <N> chunks (collected from <M> holders)...`. There is no separate autosave line. `stop` and `save-all` already copied live inventories on current core, so they do not prove this fix. The hard kill after the Saving line does.
 
 The flush is every live block entity in the chunk, not only chests. A furnace in the same chunk is the regression check. Hoppers, shulker boxes, and lock/custom-name tags are not part of the acceptance.
+
+Upstream `#4016` keeps a spectator out of a chest whose loot table has not rolled. These steps use a survival player and a chest you fill yourself. A spectator refusal on an unrolled loot chest is that fix, not an empty save.
 
 ## Setup
 
@@ -99,15 +101,14 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
 
 ## Where this branch sits
 
-Suggested merge order into `core-functionality` `70a0b846e`:
+Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on that core (`6b0d37545`), so it is not a remaining step:
 
 1. `core/A-45-worldgen-baseline` (docs only)
 2. `core/A-42-predicates` (datapacks, isolated from world save)
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
-5. `core/A-16-bed-spawn` (in-memory bed spawn)
-6. `core/A-06-player-data` (writes that spawn, and the rest of the player file)
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
 
 Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
 
