@@ -2,7 +2,9 @@
 
 Measured counts from `proto_chunk_test` on `core-functionality` `70a0b846e9b101ce717c6e00aaefe681bd590108`. This note does not change generation. The allowances in `verify_chunk_noise`, `verify_chunk_surface`, and `verify_chunk_carvers` are unchanged.
 
-A later generation change is worse when any count in this note goes up. A count that stays under the allowance can still be a regression. Do not raise the allowances to make a new run pass.
+`b0c48b2d7` (`fix: many generation mismatches`) is now on this branch through `core-functionality` `f453f24a`. It deleted the 8x8 grid fixtures and split the suite. The tables below are the `70a0b846e` measurement. They are not the output of the current command. Test 2 in `TestPlan.md` is the check for the current suite.
+
+A later generation change is worse when any count in this note goes up, for a test that still exists. A count that stays under the allowance can still be a regression. Do not raise the allowances to make a new run pass.
 
 ## Command
 

@@ -1,10 +1,10 @@
 # Test plan: A-45 worldgen baseline
 
-Branch `core/A-45-worldgen-baseline`. Confirm this branch before it is merged into `core-functionality` `70a0b846e`.
+Branch `core/A-45-worldgen-baseline`. Confirm this branch before it is merged into `core-functionality` `f453f24a`.
 
-Documentation only. No generator, chunk format, or packet change. Terrain matches `core-functionality` at `70a0b846e` and does not match vanilla. The fixture counts are the measurement. The numbers live in `docs/compat/WORLDGEN_BASELINE.md`.
+Documentation only. No generator, chunk format, or packet change. Terrain matches `core-functionality` at `f453f24a`. `docs/compat/WORLDGEN_BASELINE.md` is the measurement taken on `70a0b846e`, before `b0c48b2d7` (`fix: many generation mismatches`) replaced the suite. Do not compare a new run to those old suite totals.
 
-A higher count is a regression even when the test still passes under its allowance (noise 6000, surface 7500, carvers 8000, per chunk).
+A higher count than test 2 is a regression even when the test still passes under its allowance (noise 6000, surface 7500, carvers 8000, per chunk).
 
 ## Setup
 
@@ -51,11 +51,17 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
   cargo test -j 2 -p pumpkin-world --lib generation::proto_chunk_test -- --nocapture --test-threads=2
   ```
 
-  This is a long quiet run. The recorded run finished in 289.81 seconds. Review saw about 8 minutes on 2 threads. A silent few minutes is the test working.
-  Expect `43 passed; 0 failed`. Expect suite totals noise 2, surface 2846, carvers 9122, and the same per-chunk cells as the baseline note. A missing `Total mismatches` line on a passing test means 0.
-  Feature totals in the same run (not a pass/fail gate): overworld 47135 (worst chunk 1995), nether 353478 (worst 11567), end 0.
-  **Fail:** any failed test, or any suite total above the note (noise above 2, surface above 2846, carvers above 9122).
-  **Evidence:** the final `passed` line and the three `Total mismatches` suite lines.
+  This is a long quiet run. A run on this tree finished in 196.46 seconds on 2 threads. A silent few minutes is the test working.
+  Expect `46 passed; 0 failed`. The old `43 passed` line, the 8x8 grid suite totals (noise 2, surface 2846, carvers 9122), and the feature totals (overworld 47135, nether 353478, end 0) belong to `70a0b846e`. Those grid tests are gone. `b0c48b2d7` replaced them with stage hashes, biome hashes, and structure-start checks.
+  `count_dump_mismatches` still prints `[<name>] Total mismatches: N` only when `N > 0`. A passing test with no such line is 0. This run printed only:
+
+  - `no_blend_no_beard_carvers_7_4`: 9
+  - `no_blend_no_beard_surface_7_4`: 9
+  - `no_blend_no_beard_surface_13579_-6_11`: 56
+  - `no_blend_no_beard_surface_13579_-7_9`: 101
+
+  **Fail:** any failed test, any of those four counts going up, or a new `Total mismatches` line.
+  **Evidence:** the final `passed` line and every `Total mismatches` line.
 
 - [ ] **3. Boot** (Console)
 
@@ -73,16 +79,15 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
 
 ## Where this branch sits
 
-Suggested merge order into `core-functionality` `70a0b846e`:
+Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on that core (`6b0d37545`), so it is not a remaining step:
 
 1. `core/A-45-worldgen-baseline` (docs only)
 2. `core/A-42-predicates` (datapacks, isolated from world save)
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
-5. `core/A-16-bed-spawn` (in-memory bed spawn)
-6. `core/A-06-player-data` (writes that spawn, and the rest of the player file)
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
 
-Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
+Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's chunk format file does not overlap the core commits after `50a0a2e6`.
 
-This branch is step 1. None of the other pending branches change `proto_chunk_test` inputs. Re-run test 2 after a later merge only if that merge touches `crates/pumpkin-world/src/generation/`.
+This branch is step 1. `b0c48b2d7` already changed `proto_chunk_test`, and that change is on this branch. None of the other pending branches change those inputs. Re-run test 2 after a later merge only if that merge touches `crates/pumpkin-world/src/generation/`.
