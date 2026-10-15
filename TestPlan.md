@@ -1,10 +1,12 @@
 # Test plan: A-24 melee
 
-Branch `core/A-24-melee`. Confirm this branch before it is merged into `core-functionality` `70a0b846e`.
+Branch `core/A-24-melee`. Confirm this branch before it is merged into `core-functionality` `f453f24a`.
 
 Survival. No Strength or Weakness. Difficulty does not change player-to-mob melee damage. A wooden sword's full-charge hit is 4 damage (health 20 down to 16). The attack bar fills in about 13 ticks at 20 ticks per second. An immediate second click inside the hurt flash plays the no-damage sound and does not change health. A hit before the bar is full deals less than a full hit. Critical hits are a falling hit, not sprinting, not in water, not blind, not climbing, not riding, and multiply the sword damage by 1.5. Sweep requires a sword, a full bar, on the ground, not sprinting, and not a critical hit. Sweep damage with no Sweeping Edge ratio is 1. Marker armour stands are skipped. A sprint hit adds knockback, plays the knockback sound, and stops the sprint. Leather chest armour (3 points, 0 toughness) turns a 4-damage hit into 3.84, so health ends at 16.16. Sharpness I adds 1 at full charge (20 down to 15). A critical hit with Sharpness I ends at 13 and shows both critical particles. Switching the held item resets the attack bar. A landed hit adds a small hunger exhaustion; one hit will not show a lost shank. The attacker takes no damage.
 
-Sweeping Edge is the merge gate. Current core applies Sweeping Edge in the old attack code. This branch reads only the `sweeping_damage_ratio` attribute, and nothing applies the enchantment's attribute, so the ratio stays 0 and the sweep stays 1. That is a regression. **Do not merge this branch while test 8 fails.**
+Sweeping Edge is the merge gate. `core-functionality` `f453f24a` still applies Sweeping Edge in the old attack code. This branch reads only the `sweeping_damage_ratio` attribute, and nothing applies the enchantment's attribute, so the ratio stays 0 and the sweep stays 1. That is a regression. **Do not merge this branch while test 8 fails.**
+
+Upstream `#4040` cooks a mob drop when the mob is on fire or the weapon has Fire Aspect. That is loot, not the damage numbers in these steps. A cooked drop from a kill is not an A-24 failure.
 
 26.3 mob equipment is the `equipment` compound. `ArmorItems` is not read.
 
@@ -119,15 +121,14 @@ A mace smash (fall more than one and a half blocks, not elytra) is in this branc
 
 ## Where this branch sits
 
-Suggested merge order into `core-functionality` `70a0b846e`:
+Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on that core (`6b0d37545`), so it is not a remaining step:
 
 1. `core/A-45-worldgen-baseline` (docs only)
 2. `core/A-42-predicates` (datapacks, isolated from world save)
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
-5. `core/A-16-bed-spawn` (in-memory bed spawn)
-6. `core/A-06-player-data` (writes that spawn, and the rest of the player file)
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
 
 Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
 
