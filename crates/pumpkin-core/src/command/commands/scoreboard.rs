@@ -1,4 +1,5 @@
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
+use crate::command::argument_types::component::ComponentArgumentType;
 use crate::command::argument_types::core::integer::IntegerArgumentType;
 use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::argument_types::objective::ObjectiveArgumentType;
@@ -61,7 +62,7 @@ impl CommandExecutor for ObjectivesAddExecutor {
         let criterion = StringArgumentType::get(context, ARG_CRITERION)?;
 
         let display_name = if self.has_display_name {
-            TextComponent::text(StringArgumentType::get(context, ARG_DISPLAY_NAME)?.to_string())
+            ComponentArgumentType::get(context, ARG_DISPLAY_NAME)?
         } else {
             TextComponent::text(objective_name.to_string())
         };
@@ -630,11 +631,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &PermissionRegistr
                                         has_display_name: false,
                                     })
                                     .then(
-                                        argument(
-                                            ARG_DISPLAY_NAME,
-                                            StringArgumentType::GreedyPhrase,
-                                        )
-                                        .executes(
+                                        argument(ARG_DISPLAY_NAME, ComponentArgumentType).executes(
                                             ObjectivesAddExecutor {
                                                 has_display_name: true,
                                             },
@@ -1045,5 +1042,127 @@ mod tests {
                 "{input}: {suggestions:?}"
             );
         }
+    }
+
+    fn parsed_display_name(input: &str) -> TextComponent {
+        use crate::command::CommandSource;
+        use std::sync::Arc;
+
+        let mut dispatcher = CommandDispatcher::new();
+        register(&mut dispatcher, &PermissionRegistry::default());
+        let source = Arc::new(CommandSource::dummy());
+        let parsed = dispatcher.parse_input(input, &source);
+        assert!(parsed.errors.is_empty(), "{input}: {:?}", parsed.errors);
+        assert_eq!(parsed.reader.remaining_length(), 0, "{input}");
+        let context = parsed.context.build(input);
+        ComponentArgumentType::get(&context, ARG_DISPLAY_NAME).unwrap()
+    }
+
+    #[test]
+    fn objectives_add_parses_display_name_as_a_component() {
+        let quoted = parsed_display_name(r#"scoreboard objectives add kills dummy "Kills""#);
+        assert_eq!(quoted.get_text(), "Kills");
+
+        let json = parsed_display_name(r#"scoreboard objectives add kills dummy {"text":"Kills"}"#);
+        assert_eq!(json.clone().get_text(), "Kills");
+        assert_ne!(json, TextComponent::text(r#"{"text":"Kills"}"#));
+
+        let colored = parsed_display_name(
+            r#"scoreboard objectives add points dummy {"text":"Kills","color":"gold"}"#,
+        );
+        assert_eq!(colored.clone().get_text(), "Kills");
+        let expected: TextComponent =
+            serde_json::from_str(r#"{"text":"Kills","color":"gold"}"#).unwrap();
+        assert_eq!(colored, expected);
+    }
+
+    #[test]
+    fn objectives_add_without_display_name_parses_the_whole_line() {
+        use crate::command::CommandSource;
+        use std::sync::Arc;
+
+        let mut dispatcher = CommandDispatcher::new();
+        register(&mut dispatcher, &PermissionRegistry::default());
+        let source = Arc::new(CommandSource::dummy());
+        let input = "scoreboard objectives add kills dummy";
+        let parsed = dispatcher.parse_input(input, &source);
+        assert!(parsed.errors.is_empty(), "{input}: {:?}", parsed.errors);
+        assert_eq!(parsed.reader.remaining_length(), 0, "{input}");
+        let context = parsed.context.build(input);
+        assert!(
+            context
+                .get_argument::<TextComponent>(ARG_DISPLAY_NAME)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parsed_display_name_uses_the_shared_scoreboard_save() {
+        use pumpkin_nbt::compound::NbtCompound;
+        use pumpkin_nbt::tag::NbtTag;
+        use pumpkin_world::world_info::MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
+
+        let plain = parsed_display_name(r#"scoreboard objectives add kills dummy "Kills""#);
+        let json = parsed_display_name(r#"scoreboard objectives add json dummy {"text":"Kills"}"#);
+        let colored = parsed_display_name(
+            r#"scoreboard objectives add colored dummy {"text":"Kills","color":"gold"}"#,
+        );
+
+        let mut board = Scoreboard::new();
+        for (name, display_name) in [
+            ("kills", plain),
+            ("json", json),
+            ("colored", colored.clone()),
+        ] {
+            board.add_objective(
+                &NoTarget,
+                ScoreboardObjective::new(name, display_name, RenderType::Integer, None, "dummy"),
+            );
+        }
+
+        let saved = board.to_nbt(MAXIMUM_SUPPORTED_WORLD_DATA_VERSION);
+        assert_eq!(
+            saved.get_int("DataVersion"),
+            Some(MAXIMUM_SUPPORTED_WORLD_DATA_VERSION)
+        );
+
+        let objective = |name: &str| -> &NbtCompound {
+            saved
+                .get_compound("data")
+                .unwrap()
+                .get_list("Objectives")
+                .unwrap()
+                .iter()
+                .find_map(|tag| {
+                    let compound = tag.extract_compound()?;
+                    (compound.get_string("Name") == Some(name)).then_some(compound)
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            objective("kills").get("DisplayName"),
+            Some(&NbtTag::String("Kills".into()))
+        );
+        assert_eq!(
+            objective("json").get("DisplayName"),
+            Some(&NbtTag::String("Kills".into()))
+        );
+        let colored_tag = objective("colored").get_compound("DisplayName").unwrap();
+        assert_eq!(colored_tag.get_string("text"), Some("Kills"));
+        assert_eq!(colored_tag.get_string("color"), Some("gold"));
+
+        let loaded = Scoreboard::from_nbt(&saved);
+        assert_eq!(
+            loaded.get_objective("kills").unwrap().display_name,
+            TextComponent::text("Kills")
+        );
+        assert_eq!(
+            loaded.get_objective("json").unwrap().display_name,
+            TextComponent::text("Kills")
+        );
+        assert_eq!(
+            loaded.get_objective("colored").unwrap().display_name,
+            colored
+        );
     }
 }

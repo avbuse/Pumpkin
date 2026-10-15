@@ -1,6 +1,7 @@
 use crate::command::argument_builder::{
     ArgumentBuilder, LiteralArgumentBuilder, argument, command, literal,
 };
+use crate::command::argument_types::component::ComponentArgumentType;
 use crate::command::argument_types::core::bool::BoolArgumentType;
 use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::argument_types::entity::EntityArgumentType;
@@ -92,7 +93,7 @@ impl CommandExecutor for TeamAddExecutor {
     fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
         let team_name = StringArgumentType::get(context, ARG_TEAM_NAME)?;
         let display_name = if self.has_display_name {
-            TextComponent::text(StringArgumentType::get(context, ARG_DISPLAY_NAME)?.to_string())
+            ComponentArgumentType::get(context, ARG_DISPLAY_NAME)?
         } else {
             TextComponent::text(team_name.to_string())
         };
@@ -942,11 +943,9 @@ fn add_branch() -> LiteralArgumentBuilder {
                 has_display_name: false,
             })
             .then(
-                argument(ARG_DISPLAY_NAME, StringArgumentType::GreedyPhrase).executes(
-                    TeamAddExecutor {
-                        has_display_name: true,
-                    },
-                ),
+                argument(ARG_DISPLAY_NAME, ComponentArgumentType).executes(TeamAddExecutor {
+                    has_display_name: true,
+                }),
             ),
     )
 }
@@ -1106,4 +1105,97 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &PermissionRegistr
             .then(list_branch())
             .then(modify_branch()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::CommandSource;
+    use crate::world::scoreboard::{NoTarget, Scoreboard};
+    use pumpkin_nbt::tag::NbtTag;
+    use pumpkin_world::world_info::MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
+    use std::sync::Arc;
+
+    fn parsed_display_name(input: &str) -> TextComponent {
+        let mut dispatcher = CommandDispatcher::new();
+        register(&mut dispatcher, &PermissionRegistry::default());
+        let source = Arc::new(CommandSource::dummy());
+        let parsed = dispatcher.parse_input(input, &source);
+        assert!(parsed.errors.is_empty(), "{input}: {:?}", parsed.errors);
+        assert_eq!(parsed.reader.remaining_length(), 0, "{input}");
+        let context = parsed.context.build(input);
+        ComponentArgumentType::get(&context, ARG_DISPLAY_NAME).unwrap()
+    }
+
+    #[test]
+    fn team_add_parses_display_name_as_a_component() {
+        let quoted = parsed_display_name(r#"team add red "Red""#);
+        assert_eq!(quoted.get_text(), "Red");
+
+        let json = parsed_display_name(r#"team add red {"text":"Red"}"#);
+        assert_eq!(json.clone().get_text(), "Red");
+        assert_ne!(json, TextComponent::text(r#"{"text":"Red"}"#));
+    }
+
+    #[test]
+    fn team_add_without_display_name_parses_the_whole_line() {
+        let mut dispatcher = CommandDispatcher::new();
+        register(&mut dispatcher, &PermissionRegistry::default());
+        let source = Arc::new(CommandSource::dummy());
+        let input = "team add red";
+        let parsed = dispatcher.parse_input(input, &source);
+        assert!(parsed.errors.is_empty(), "{input}: {:?}", parsed.errors);
+        assert_eq!(parsed.reader.remaining_length(), 0, "{input}");
+        let context = parsed.context.build(input);
+        assert!(
+            context
+                .get_argument::<TextComponent>(ARG_DISPLAY_NAME)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parsed_team_display_name_uses_the_shared_scoreboard_save() {
+        let display_name = parsed_display_name(r#"team add red "Red""#);
+        let mut board = Scoreboard::new();
+        board.add_team(
+            &NoTarget,
+            Team {
+                name: "red".to_string(),
+                display_name,
+                options: 0,
+                nametag_visibility: NameTagVisibility::Always,
+                collision_rule: CollisionRule::Always,
+                color: NamedColor::White,
+                player_prefix: TextComponent::empty(),
+                player_suffix: TextComponent::empty(),
+                players: Vec::new(),
+            },
+        );
+
+        let saved = board.to_nbt(MAXIMUM_SUPPORTED_WORLD_DATA_VERSION);
+        let team = saved
+            .get_compound("data")
+            .unwrap()
+            .get_list("Teams")
+            .unwrap()
+            .iter()
+            .find_map(|tag| {
+                let compound = tag.extract_compound()?;
+                (compound.get_string("Name") == Some("red")).then_some(compound)
+            })
+            .unwrap();
+        assert_eq!(team.get("DisplayName"), Some(&NbtTag::String("Red".into())));
+
+        let loaded = Scoreboard::from_nbt(&saved);
+        assert_eq!(
+            loaded
+                .get_team("red")
+                .unwrap()
+                .display_name
+                .clone()
+                .get_text(),
+            "Red"
+        );
+    }
 }
