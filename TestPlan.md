@@ -1,6 +1,6 @@
 # Test plan: A-48 chunk format 5023
 
-Branch `core/A-48-chunk-5023`. Confirm this branch before it is merged into `core-functionality` `70a0b846e`.
+Branch `core/A-48-chunk-5023`. Confirm this branch before it is merged into `core-functionality` `f453f24a`.
 
 This branch reads three block-state palette shapes and writes 5023:
 
@@ -10,7 +10,7 @@ This branch reads three block-state palette shapes and writes 5023:
 
 A default furnace (facing north, unlit) is a default state and is written as the block id. Oak stairs facing east are not. Biomes stay a string palette. Block-entity compounds are copied with their original tag types: furnace cook times, brewing numbers, and pot sherds are not rewritten. An unknown block id becomes air, with no log line. Lighting is copied, not recomputed.
 
-This branch's merge base with `core-functionality` is `50a0a2e6`, not `70a0b846e`. Time, weather, border, and scoreboard restore (A-05) are on core and are not on this branch. Do not fail A-48 because time or the scoreboard resets. The chunk format file does not overlap the later core commits, so the merge itself is the format change onto current core.
+This branch now includes `core-functionality` `f453f24a`, including A-05 time, weather, border, and scoreboard restore. A reset of those after `stop` is a fail. The chunk format file does not overlap the core commits after `50a0a2e6`. The 5023 writer on this branch is still this branch's change.
 
 Worlds outside data version 4435..5023 are rejected with `Unsupported world version`. 26.2 is 4903. 26.3 is 5023. Both are in range. Copy a world. Do not test against the only copy.
 
@@ -69,7 +69,7 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
 
 - [ ] **4. A world saved by current core opens here, then in vanilla** (Client)
 
-  On `core-functionality` `70a0b846e`, new world, place oak stairs facing east, a furnace, and stone. `stop`.
+  On `core-functionality` `f453f24a`, new world, place oak stairs facing east, a furnace, and stone. `stop`.
   Copy that `world/` onto this branch. Start this branch and join.
   Expect those blocks, not air. Current core writes `Name` / `Properties` palettes labelled 5023, which this branch still reads.
   `stop` on this branch. Open that same world in vanilla 26.3.
@@ -84,18 +84,24 @@ Each step has a checkbox. Record pass, fail, or not run, plus the evidence named
   **Fail:** a panic while creating or saving the level.
   **Evidence:** the log.
 
+- [ ] **6. Time survives stop** (Console)
+
+  A-05 is on this branch. `time set 1000`, `stop`, start, `time query daytime`.
+  Expect about 1000, plus any ticks that passed before `stop`.
+  **Fail:** daytime back at the new-world value. Weather, the world border, and the scoreboard follow the same rule. A reset is a fail. The full A-05 checklist is not required.
+  **Evidence:** the two query lines.
+
 ## Where this branch sits
 
-Suggested merge order into `core-functionality` `70a0b846e`:
+Suggested merge order into `core-functionality` `f453f24a`. A-16 is already on that core (`6b0d37545`), so it is not a remaining step:
 
 1. `core/A-45-worldgen-baseline` (docs only)
 2. `core/A-42-predicates` (datapacks, isolated from world save)
 3. `core/A-48-chunk-5023` (chunk codec, before saves vanilla must read)
 4. `core/A-20-container-persist` (autosave flush into the chunk A-48 writes)
-5. `core/A-16-bed-spawn` (in-memory bed spawn)
-6. `core/A-06-player-data` (writes that spawn, and the rest of the player file)
-7. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
+5. `core/A-06-player-data` (writes the bed spawn, and the rest of the player file)
+6. `core/A-24-melee` last, after Sweeping Edge deals more than 1, rebased onto A-06
 
-Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's merge base is `50a0a2e6`, and its chunk format file does not overlap the later core commits.
+Only A-06 and A-24 both change `crates/pumpkin-core/src/entity/player.rs`. A-48's chunk format file does not overlap the core commits after `50a0a2e6`.
 
 This branch is step 3, before A-20. After both are merged, place cobblestone in a chest and coal in a furnace in the same chunk, set `autosave_ticks = 200`, stay in the chunk, wait for `Saving <N> chunks...`, `kill -9`, and start. Both items must remain. Then `stop` and open that world in vanilla 26.3: the chest exists and the cobblestone is still in it.
