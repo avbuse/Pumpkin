@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    fs,
-    path::Path,
-};
+use std::{collections::HashSet, fs, path::Path};
 
 use heck::{ToPascalCase, ToShoutySnakeCase};
 use proc_macro2::TokenStream;
@@ -229,11 +225,27 @@ fn state_provider_to_tokens(provider: &StateProviderJson) -> TokenStream {
     }
 }
 
+#[derive(Deserialize)]
+struct BlockListFile {
+    blocks: Vec<NamedBlock>,
+}
+
+#[derive(Deserialize)]
+struct NamedBlock {
+    name: String,
+}
+
 pub fn build() -> TokenStream {
-    let blocks_file: BTreeMap<String, serde_json::Value> =
+    // `blocks.json` is `{ "blocks": [ { "name": "oak_log", ... }, ... ] }`.
+    // Reading the top-level keys leaves every transformer rule unmatched.
+    let blocks_file: BlockListFile =
         serde_json::from_str(&fs::read_to_string("../../assets/blocks.json").unwrap())
             .expect("Failed to parse blocks.json");
-    let valid_blocks: HashSet<String> = blocks_file.into_keys().collect();
+    let valid_blocks: HashSet<String> = blocks_file
+        .blocks
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
 
     let dir = Path::new("../../assets/datapack/data/minecraft/block_transformer");
     let mut files: Vec<(String, Vec<TransformerEntryJson>)> = Vec::new();
