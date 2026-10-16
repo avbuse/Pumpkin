@@ -12,7 +12,6 @@ use std::sync::atomic::{
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use crate::entity::attributes::{Modifier, ModifierOperation};
 use crate::plugin::api::events::enchantment::{EnchantItemEvent, PrepareItemEnchantEvent};
 use crate::world::scoreboard::{BedrockScoreboard, Scoreboard};
 use advancement::PlayerAdvancement;
@@ -454,9 +453,6 @@ pub struct Player {
     pub current_block_destroy_stage: AtomicI32,
     /// The per-tick block destruction progress last sent to Bedrock clients.
     pub current_block_breaking_speed: AtomicU32,
-    /// The held item's Efficiency level last synced to the client via the `mining_efficiency`
-    /// attribute. -1 means never synced
-    pub synced_mining_efficiency_level: AtomicI32,
     /// Indicates if the player is currently mining a block.
     pub mining: AtomicBool,
     pub start_mining_time: AtomicI32,
@@ -746,7 +742,6 @@ impl Player {
             hunger_manager: HungerManager::default(),
             current_block_destroy_stage: AtomicI32::new(-1),
             current_block_breaking_speed: AtomicU32::new(0),
-            synced_mining_efficiency_level: AtomicI32::new(-1),
             enchantment_seed: AtomicI32::new(rand::random()),
             open_container: AtomicCell::new(None),
             open_container_pos: AtomicCell::new(None),
@@ -5123,41 +5118,9 @@ impl Player {
         !state.tool_required() || self.inventory().held_item().is_correct_for_drops(block)
     }
 
-    /// The id under which Pumpkin will store it's `mining_efficiency` modifier value
-    const EFFICIENCY_ATTRIBUTE_MODIFIER_ID: &'static str = "minecraft:enchantment.efficiency";
-
-    fn sync_mining_efficiency(&self) {
-        let level = self
-            .inventory()
-            .held_item()
-            .get_enchantment_level(&Enchantment::EFFICIENCY);
-        if self
-            .synced_mining_efficiency_level
-            .swap(level, Ordering::Relaxed)
-            == level
-        {
-            return;
-        }
-        self.living_entity
-            .update_attribute(&Attributes::MINING_EFFICIENCY, |inst| {
-                if level > 0 {
-                    inst.add_or_replace_modifier(Modifier {
-                        id: Self::EFFICIENCY_ATTRIBUTE_MODIFIER_ID.to_string(),
-                        amount: f64::from(level * level + 1),
-                        operation: ModifierOperation::Add,
-                    });
-                } else {
-                    inst.remove_modifier(Self::EFFICIENCY_ATTRIBUTE_MODIFIER_ID);
-                }
-            });
-        crate::entity::attributes::send_attribute_updates_for_living(
-            &self.living_entity,
-            vec![Attributes::MINING_EFFICIENCY],
-        );
-    }
-
     pub fn get_mining_speed(&self, block: &'static Block) -> f32 {
-        self.sync_mining_efficiency();
+        // Efficiency is the held item's `mining_efficiency` modifier. A hotbar
+        // change applies it through the equipment update before the next dig.
         let held_item = self.inventory.held_item();
         let mut speed = held_item.get_speed(block);
         // Effi only gets applied if tool's break speed for block is alreadyabove 1 (meaning it's

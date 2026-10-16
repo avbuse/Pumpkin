@@ -4203,4 +4203,47 @@ mod tests {
         let second = enchantment_attribute_modifiers(&sword, &EquipmentSlot::MAIN_HAND);
         assert_eq!(second[0].1.amount, f64::from(2.0f32 / 3.0));
     }
+
+    #[test]
+    fn efficiency_follows_a_main_hand_swap() {
+        use std::borrow::Cow;
+
+        // A hotbar change sends the new main-hand stack through the equipment
+        // update, which applies these modifiers and drops the previous ids.
+        let mut pick = ItemStack::new(1, &Item::DIAMOND_PICKAXE);
+        pick.set_data_component(EnchantmentsImpl {
+            enchantment: Cow::Owned(vec![(&Enchantment::EFFICIENCY, 5)]),
+        });
+        let main = enchantment_attribute_modifiers(&pick, &EquipmentSlot::MAIN_HAND);
+        let efficiency = main
+            .iter()
+            .find(|(attribute, _)| *attribute == &Attributes::MINING_EFFICIENCY)
+            .expect("efficiency writes mining_efficiency");
+        assert_eq!(efficiency.1.id, "minecraft:enchantment.efficiency");
+        assert_eq!(efficiency.1.operation, ModifierOperation::Add);
+        // `levels_squared` with added 1 is level² + 1. Efficiency V is 26.
+        assert_eq!(efficiency.1.amount, 26.0);
+
+        pick.set_data_component(EnchantmentsImpl {
+            enchantment: Cow::Owned(vec![(&Enchantment::EFFICIENCY, 1)]),
+        });
+        let first = enchantment_attribute_modifiers(&pick, &EquipmentSlot::MAIN_HAND);
+        let first = first
+            .iter()
+            .find(|(attribute, _)| *attribute == &Attributes::MINING_EFFICIENCY)
+            .expect("efficiency I");
+        assert_eq!(first.1.amount, 2.0);
+
+        assert!(
+            enchantment_attribute_modifiers(&pick, &EquipmentSlot::OFF_HAND)
+                .iter()
+                .all(|(attribute, _)| *attribute != &Attributes::MINING_EFFICIENCY)
+        );
+        let plain = ItemStack::new(1, &Item::DIAMOND_PICKAXE);
+        assert!(
+            enchantment_attribute_modifiers(&plain, &EquipmentSlot::MAIN_HAND)
+                .iter()
+                .all(|(attribute, _)| *attribute != &Attributes::MINING_EFFICIENCY)
+        );
+    }
 }
