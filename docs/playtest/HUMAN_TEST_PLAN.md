@@ -6,9 +6,9 @@ Use a licensed Java Edition **26.3** client. Protocol target on this tree is 26.
 
 Check out one branch at a time, in its own scratch directory. Do not merge the branches together until the merge-order section.
 
-The copy the project host reads is `TestPlan.md` at the root of that task branch. This file is the combined list. The steps match.
+The plan on each task branch is `docs/playtest/<TASK>.md`. This file is the combined list. The steps match.
 
-Each open branch tip is a docs commit on top of a merge of `core-functionality` `f453f24a`. The code and checklist commits under that merge are unchanged. Follow `TestPlan.md` on the branch if this combined list and that file ever disagree.
+Each open branch tip includes a merge of `core-functionality` `f453f24a`. Follow `docs/playtest/<TASK>.md` on the branch if this combined list and that file ever disagree.
 
 | Branch | Code | Checklist | Tip |
 | --- | --- | --- | --- |
@@ -54,7 +54,7 @@ Each step below has a checkbox. Record pass, fail, or not run, plus the evidence
 
 ## A-06 player data
 
-Branch `core/A-06-player-data`. Code `136e748bd` (`fix(player): write the vanilla respawn compound`). Checklist `4b0865413`. `TestPlan.md` `97828ec92`.
+Branch `core/A-06-player-data`. Code `136e748bd` (`fix(player): write the vanilla respawn compound`). Checklist `4b0865413`. Plan `docs/playtest/A-06.md`.
 
 A survival player who logs out comes back with the same health, hunger, inventory, spawn point, and gamemode. The branch writes the 26.3 `respawn` compound (`dimension`, `pos`, `yaw`, `pitch`, `forced`). Yaw is wrapped into -180..180 on write (270 becomes -90, 180 becomes -180). Pitch is clamped to -90..90 (120 becomes 90). Legacy `SpawnX` / `SpawnY` / `SpawnZ` / `SpawnAngle` / `SpawnDimension` / `SpawnForced` are read from old files and are not written. Old Pumpkin files that stored `respawn.angle` still load that value as yaw.
 
@@ -136,7 +136,7 @@ Use a new world. One player, opped. Leave `hardcore` false. Upstream `#4041` set
 
 Branch `core/A-16-bed-spawn` is already merged into `core-functionality` as `6b0d37545`. The steps below describe that branch on its own. Do not playtest the old branch tip. Use A-06.8 on `core/A-06-player-data` for the bed plus the saved `respawn` compound.
 
-Code `1650c9413` (`fix(block): set the bed spawn before the night and monster checks`). Checklist `ed2bfe6e4`. `TestPlan.md` `0b1b55a11`.
+Code `1650c9413` (`fix(block): set the bed spawn before the night and monster checks`). Checklist `ed2bfe6e4`. Plan `docs/playtest/A-16.md`.
 
 Right-click order on an overworld bed: explosion in the Nether and the End, then occupied, then too far, then a solid block above the bed, then the respawn write, then the night check, then the monster check. A daytime click and a monster click still set the spawn when the bed is in range and clear. Too far, obstructed, occupied, and an explosion do not.
 
@@ -239,7 +239,7 @@ New overworld, survival, opped. `time set day` and `weather clear` to start. Bed
 
 ## A-20 container persistence
 
-Branch `core/A-20-container-persist`. Code `cf0f3dfd8` (`fix(world): flush live block entities before autosave`). Checklist `a37f7ce13`. `TestPlan.md` `d75c8727a`.
+Branch `core/A-20-container-persist`. Code `cf0f3dfd8` (`fix(world): flush live block entities before autosave`). Checklist `a37f7ce13`. Plan `docs/playtest/A-20.md`.
 
 Closing a chest or barrel only updates the live inventory. The chunk snapshot is written when the chunk unloads, when you `save-all`, when you `stop`, and on the periodic autosave. Before this branch the autosave set the save flag without copying live block entities, so a crash after the autosave line could store an empty chest while the chunk stayed loaded.
 
@@ -310,7 +310,7 @@ Upstream `#4016` keeps a spectator out of a chest whose loot table has not rolle
 
 ## A-24 melee
 
-Branch `core/A-24-melee`. Code `b88bccbea` (`docs(review): add A-24 review notes`). The gameplay commits are `38bda99f0` and `5f588c72f`. Checklist `c2c0ea980`. `TestPlan.md` `fe4cf7542`.
+Branch `core/A-24-melee`. Code `b88bccbea` (`docs(review): add A-24 review notes`). The gameplay commits are `38bda99f0` and `5f588c72f`. Checklist `c2c0ea980`. Plan `docs/playtest/A-24.md`.
 
 Survival. No Strength or Weakness. Difficulty does not change player-to-mob melee damage. A wooden sword's full-charge hit is 4 damage (health 20 down to 16). The attack bar fills in about 13 ticks at 20 ticks per second. An immediate second click inside the hurt flash plays the no-damage sound and does not change health. A hit before the bar is full deals less than a full hit. Critical hits are a falling hit, not sprinting, not in water, not blind, not climbing, not riding, and multiply the sword damage by 1.5. Sweep requires a sword, a full bar, on the ground, not sprinting, and not a critical hit. Sweep damage with no Sweeping Edge ratio is 1. Marker armour stands are skipped. A sprint hit adds knockback, plays the knockback sound, and stops the sprint. Leather chest armour (3 points, 0 toughness) turns a 4-damage hit into 3.84, so health ends at 16.16. Sharpness I adds 1 at full charge (20 down to 15). A critical hit with Sharpness I ends at 13 and shows both critical particles. Switching the held item resets the attack bar. A landed hit adds a small hunger exhaustion; one hit will not show a lost shank. The attacker takes no damage.
 
@@ -401,7 +401,7 @@ A mace smash (fall more than one and a half blocks, not elytra) is in this branc
 
 ## A-42 predicates
 
-Branch `core/A-42-predicates`. Code `62f37b12a` (`fix(datapack): parse predicates as loot conditions`). Checklist `6744fae3d`. `TestPlan.md` `46cee30b0`.
+Branch `core/A-42-predicates`. Code `62f37b12a` (`fix(datapack): parse predicates as loot conditions`). Checklist `6744fae3d`. Plan `docs/playtest/A-42.md`.
 
 Predicate files are parsed as the same loot conditions the loader already uses. The three embedded vanilla predicates load: `minecraft:tool/can_silk_touch`, `minecraft:tool/can_shear`, `minecraft:block/fast_cooking`. `match_block` is supported, so `fast_cooking` must not warn. Only `data/<namespace>/predicate/` is loaded. `predicates/` is ignored. An unknown type logs a warning and the server stays up.
 
@@ -465,7 +465,7 @@ Upstream `#4040` cooks a mob drop when the mob is on fire or dies to Fire Aspect
 
 ## A-45 worldgen baseline
 
-Branch `core/A-45-worldgen-baseline`. Code `c2a34dcdc` (`docs(review): add A-45 review notes`). Checklist `62b41b555`. `TestPlan.md` `6a2216b92`.
+Branch `core/A-45-worldgen-baseline`. Code `c2a34dcdc` (`docs(review): add A-45 review notes`). Checklist `62b41b555`. Plan `docs/playtest/A-45.md`.
 
 Documentation only. No generator, chunk format, or packet change. Terrain matches `core-functionality` at `f453f24a`. `docs/compat/WORLDGEN_BASELINE.md` on the A-45 branch is the measurement taken on `70a0b846e`, before `b0c48b2d7` replaced the suite. Do not compare a new run to those old suite totals.
 
@@ -514,7 +514,7 @@ A higher count than A-45.2 is a regression even when the test still passes under
 
 ## A-48 chunk format 5023
 
-Branch `core/A-48-chunk-5023`. Code `9af839d07` (`docs(review): add A-48 review notes`). The format commit is `0c173c4ac`. Checklist `cfe488f87`. `TestPlan.md` `74b58a647`.
+Branch `core/A-48-chunk-5023`. Code `9af839d07` (`docs(review): add A-48 review notes`). The format commit is `0c173c4ac`. Checklist `cfe488f87`. Plan `docs/playtest/A-48.md`.
 
 This branch reads three block-state palette shapes and writes 5023:
 
