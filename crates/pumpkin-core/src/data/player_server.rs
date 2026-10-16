@@ -6,6 +6,7 @@ use crossbeam::atomic::AtomicCell;
 use pumpkin_inventory::screen_handler::ScreenHandler;
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_world::data::player_data::{PlayerDataError, PlayerDataStorage};
+use std::io;
 use std::sync::Arc;
 use std::{
     path::PathBuf,
@@ -44,7 +45,7 @@ impl ServerPlayerData {
     /// # Returns
     ///
     /// A Result indicating success or the error that occurred.
-    pub fn handle_player_leave(&self, player: &Arc<Player>) -> Result<(), PlayerDataError> {
+    pub async fn handle_player_leave(&self, player: &Arc<Player>) -> Result<(), PlayerDataError> {
         player
             .player_screen_handler
             .lock()
@@ -52,11 +53,26 @@ impl ServerPlayerData {
             .on_closed(player.as_ref());
         player.on_handled_screen_closed();
 
+        if !self.storage.is_save_enabled() {
+            return Ok(());
+        }
+
+        let uuid = player.gameprofile.id;
+        // Sequence is taken before the leave flag, so this logout save is
+        // newer than any periodic snapshot already queued.
+        let Some(sequence) = self.storage.begin_snapshot(&uuid) else {
+            self.storage.mark_player_left(&uuid);
+            return Ok(());
+        };
+        self.storage.mark_player_left(&uuid);
+
         let mut nbt = NbtCompound::new();
         player.write_nbt(&mut nbt);
 
-        self.storage.save_player_data(&player.gameprofile.id, nbt)?;
-        Ok(())
+        let storage = Arc::clone(&self.storage);
+        tokio::task::spawn_blocking(move || storage.save_player_data_at(&uuid, sequence, nbt))
+            .await
+            .unwrap_or_else(|error| Err(PlayerDataError::Io(io::Error::other(error))))
     }
 
     /// Performs periodic maintenance tasks.
@@ -76,9 +92,16 @@ impl ServerPlayerData {
             let mut snapshots = Vec::new();
             for world in server.worlds.load().iter() {
                 for player in world.players.load().iter() {
+                    let uuid = player.gameprofile.id;
+                    if self.storage.player_has_left(&uuid) {
+                        continue;
+                    }
+                    let Some(sequence) = self.storage.begin_snapshot(&uuid) else {
+                        continue;
+                    };
                     let mut nbt = NbtCompound::new();
                     player.write_nbt(&mut nbt);
-                    snapshots.push((player.gameprofile.id, nbt));
+                    snapshots.push((uuid, sequence, nbt));
                 }
             }
 
@@ -88,8 +111,12 @@ impl ServerPlayerData {
 
             let storage = self.storage.clone();
             rayon::spawn(move || {
-                for (uuid, nbt) in snapshots {
-                    if let Err(e) = storage.save_player_data(&uuid, nbt) {
+                for (uuid, sequence, nbt) in snapshots {
+                    if storage.player_has_left(&uuid) {
+                        storage.finish_snapshot(&uuid);
+                        continue;
+                    }
+                    if let Err(e) = storage.save_player_data_at(&uuid, sequence, nbt) {
                         error!("Failed to save player data for {uuid}: {e}");
                     }
                 }
@@ -102,15 +129,43 @@ impl ServerPlayerData {
     ///
     /// This function immediately saves all online players' data to disk.
     /// Useful for server shutdown or backup operations.
-    pub fn save_all_players(&self, server: &Server) -> Result<(), PlayerDataError> {
-        let mut total_players = 0;
+    pub async fn save_all_players(&self, server: &Server) -> Result<(), PlayerDataError> {
+        let mut snapshots = Vec::new();
 
-        // Save players from all worlds
         for world in server.worlds.load().iter() {
             for player in world.players.load().iter() {
-                self.extract_data_and_save_player(player)?;
-                total_players += 1;
+                let uuid = player.gameprofile.id;
+                if self.storage.player_has_left(&uuid) {
+                    continue;
+                }
+                let Some(sequence) = self.storage.begin_snapshot(&uuid) else {
+                    continue;
+                };
+                let mut nbt = NbtCompound::new();
+                player.write_nbt(&mut nbt);
+                snapshots.push((uuid, sequence, nbt));
             }
+        }
+
+        let total_players = snapshots.len();
+        let storage = Arc::clone(&self.storage);
+        let first_error = tokio::task::spawn_blocking(move || {
+            let mut first_error = None;
+            for (uuid, sequence, nbt) in snapshots {
+                if let Err(err) = storage.save_player_data_at(&uuid, sequence, nbt) {
+                    error!("Failed to save player data for {uuid}: {err}");
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+            first_error
+        })
+        .await
+        .unwrap_or_else(|error| Some(PlayerDataError::Io(io::Error::other(error))));
+
+        if let Some(err) = first_error {
+            return Err(err);
         }
 
         debug!("Saved data for {total_players} online players");

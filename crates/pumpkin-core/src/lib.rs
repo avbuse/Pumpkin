@@ -510,6 +510,7 @@ impl PumpkinServer {
             .server
             .player_data_storage
             .save_all_players(&self.server)
+            .await
         {
             error!("Error saving all players during shutdown: {e}");
         }
@@ -619,6 +620,7 @@ impl PumpkinServer {
                                     if let Err(e) = server_clone
                                         .player_data_storage
                                         .handle_player_leave(&player)
+                                        .await
                                     {
                                         error!("Failed to save player data on disconnect: {e}");
                                     }
@@ -722,7 +724,10 @@ impl PumpkinServer {
                         client.await_tasks().await;
                         player.remove().await;
                         server.remove_player(&player);
-                        if let Err(error) = server.player_data_storage.handle_player_leave(&player)
+                        if let Err(error) = server
+                            .player_data_storage
+                            .handle_player_leave(&player)
+                            .await
                         {
                             error!("Failed to save player data on disconnect: {error}");
                         }

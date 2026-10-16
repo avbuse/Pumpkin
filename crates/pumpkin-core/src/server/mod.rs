@@ -678,7 +678,7 @@ impl Server {
             return Err(format!("Failed to save world info: {err}"));
         }
 
-        if let Err(err) = self.player_data_storage.save_all_players(self) {
+        if let Err(err) = self.player_data_storage.save_all_players(self).await {
             error!("Failed to save player data: {err}");
             return Err(format!("Failed to save player data: {err}"));
         }
