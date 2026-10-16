@@ -6,20 +6,24 @@
 //! on the row they fix. A-40 adds sticky-piston retract and quasi-connectivity rows
 //! the same way.
 //!
-//! The numbers below were read from a frozen 26.3 world: place the trigger, then
-//! `/tick step` one game tick at a time. Repeater setting 4 powers its output on tick
-//! 8. A comparator and an observer resolve on tick 2, and the observer is dark again
-//! on tick 4. A dispenser acts on tick 4. A piston is still a moving block on ticks
-//! 1 and 2, and the pushed block is in place on tick 3.
+//! The repeater, comparator, piston, observer, and dispenser numbers below were
+//! read from a frozen 26.3 world: place the trigger, then `/tick step` one game
+//! tick at a time. Repeater setting 4 powers its output on tick 8. A comparator
+//! and an observer resolve on tick 2, and the observer is dark again on tick 4.
+//! A dispenser acts on tick 4. A piston is still a moving block on ticks 1 and 2,
+//! and the pushed block is in place on tick 3.
 //!
 //! Facing on a repeater or comparator is the side it reads. The piston, observer, and
 //! dispenser facing values are the direction they push, watch, and shoot.
 //!
-//! Dust power is settled on tick 0, in the neighbour updates from the trigger. A line
-//! loses one power per dust, a branch continues from the junction at that same loss,
-//! and the dust 16 steps from a source stays at 0. Vertical links do the same when
-//! the block above the lower dust is not solid. Weak power does not cross a solid
-//! block. Strong power into that block is taken in full.
+//! `dust_beside_source`, `dust_line_of_fifteen`, `dust_branch`, and
+//! `dust_signal_stops_at_zero` were read the same way, with `/tick step`, in that
+//! frozen 26.3 world. Every dust row after those four was read from a headless 26.3
+//! server with `/tick freeze`, then `setblock` in the same order as `build`, then
+//! `execute if block ... redstone_wire[power=N]` before any game tick. The powers
+//! in those rows are that reading. That includes `dust_climb_blocked_by_solid`
+//! (upper dust 0), `dust_drop_blocked_by_solid` (lower dust 0), and
+//! `dust_reads_strong_power_through_solid` (dust 15).
 
 use pumpkin_data::block_properties::{Facing, HorizontalFacing, ModeComparator};
 
@@ -1145,6 +1149,7 @@ const CASES: &[RedstoneOrderCase] = &[
         expect: Expectation::samples(DUST_STOPS),
         ignored: None,
     },
+    // A-37 rows. Powers were read from the frozen 26.3 server described above.
     RedstoneOrderCase {
         id: "dust_climbs_onto_block",
         lane: RedstoneLane::Dust,
