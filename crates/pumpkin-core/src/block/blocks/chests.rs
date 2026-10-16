@@ -3,10 +3,12 @@ use std::sync::Arc;
 use crate::block::entities::BlockEntity;
 use crate::block::entities::chest::ChestBlockEntity;
 use pumpkin_data::BlockStateId;
+use pumpkin_data::HorizontalFacingExt;
 use pumpkin_data::block_properties::{ChestLikeProperties, ChestType, HorizontalFacing};
 use pumpkin_data::entity::EntityPose;
 use pumpkin_data::loot_table::get_loot_table;
-use pumpkin_data::{Block, BlockDirection, translation};
+use pumpkin_data::tag::Taggable;
+use pumpkin_data::{Block, BlockDirection, tag, translation};
 use pumpkin_inventory::Inventory;
 use pumpkin_inventory::double::DoubleInventory;
 use pumpkin_inventory::generic_container_screen_handler::{create_generic_9x3, create_generic_9x6};
@@ -23,9 +25,9 @@ use std::sync::Mutex;
 
 use crate::block::{
     BlockBehaviour, BrokenArgs, EmitsRedstonePowerArgs, GetComparatorOutputArgs,
-    GetRedstonePowerArgs, GetScreenHandlerFactoryArgs, NormalUseArgs, OnPlaceArgs,
-    OnSyncedBlockEventArgs, PathComputationType, PlacedArgs, RandomTickArgs,
-    registry::BlockActionResult,
+    GetRedstonePowerArgs, GetScreenHandlerFactoryArgs, GetStateForNeighborUpdateArgs,
+    NormalUseArgs, OnPlaceArgs, OnSyncedBlockEventArgs, PathComputationType, PlacedArgs,
+    RandomTickArgs, registry::BlockActionResult,
 };
 use crate::entity::EntityBase;
 use crate::entity::player::Player;
@@ -450,6 +452,43 @@ impl BlockBehaviour for CopperChestBlock {
     fn is_pathfindable(&self, _state: &BlockState, _computation_type: PathComputationType) -> bool {
         false
     }
+
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        copper_chest_state_for_neighbor(args.state_id, args.direction, args.neighbor_state_id)
+    }
+
+    fn should_changed_state_keep_block_entity(&self, old_block: &Block) -> bool {
+        old_block.has_tag(&tag::Block::MINECRAFT_COPPER_CHESTS)
+    }
+}
+
+/// The block a connected copper chest becomes when the neighbour copper chest changes.
+///
+/// The neighbour's block is copied onto this half, and this half keeps its own facing,
+/// type, and waterlogged value. A single chest, or a neighbour that is not the connected
+/// side, stays as it is.
+fn copper_chest_state_for_neighbor(
+    state_id: BlockStateId,
+    direction: BlockDirection,
+    neighbor_state_id: BlockStateId,
+) -> BlockStateId {
+    let neighbor_block = Block::from_state_id(neighbor_state_id);
+    if !neighbor_block.has_tag(&tag::Block::MINECRAFT_COPPER_CHESTS) {
+        return state_id;
+    }
+    let props = ChestLikeProperties::from_state_id(state_id);
+    let connected = match props.r#type {
+        ChestType::Single => return state_id,
+        ChestType::Left => props.facing.rotate_clockwise(),
+        ChestType::Right => props.facing.rotate_counter_clockwise(),
+    };
+    if connected.to_block_direction() != direction {
+        return state_id;
+    }
+    props.to_state_id(neighbor_block)
 }
 
 /// Trapped chests have the same behavior as wooden chests but also emit redstone power based on viewer count.
@@ -631,5 +670,63 @@ impl ChestTypeExt for ChestType {
             Self::Left => Self::Right,
             Self::Right => Self::Left,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copper_chest_state_for_neighbor;
+    use pumpkin_data::BlockDirection;
+    use pumpkin_data::block_properties::{ChestLikeProperties, ChestType, HorizontalFacing};
+    use pumpkin_data::{Block, BlockStateId};
+
+    fn chest_state(block: &Block, facing: HorizontalFacing, chest_type: ChestType) -> BlockStateId {
+        let mut props = ChestLikeProperties::default(block);
+        props.facing = facing;
+        props.r#type = chest_type;
+        props.to_state_id(block)
+    }
+
+    #[test]
+    fn connected_half_copies_the_neighbour_block() {
+        let left = chest_state(
+            &Block::OXIDIZED_COPPER_CHEST,
+            HorizontalFacing::North,
+            ChestType::Left,
+        );
+        let right = chest_state(
+            &Block::WEATHERED_COPPER_CHEST,
+            HorizontalFacing::North,
+            ChestType::Right,
+        );
+
+        // Left connects clockwise from north, which is east.
+        let updated = copper_chest_state_for_neighbor(left, BlockDirection::East, right);
+        assert_eq!(
+            Block::from_state_id(updated),
+            &Block::WEATHERED_COPPER_CHEST
+        );
+        let updated_props = ChestLikeProperties::from_state_id(updated);
+        assert_eq!(updated_props.facing, HorizontalFacing::North);
+        assert_eq!(updated_props.r#type, ChestType::Left);
+
+        let unchanged = copper_chest_state_for_neighbor(left, BlockDirection::West, right);
+        assert_eq!(unchanged, left);
+
+        let single = chest_state(
+            &Block::OXIDIZED_COPPER_CHEST,
+            HorizontalFacing::North,
+            ChestType::Single,
+        );
+        assert_eq!(
+            copper_chest_state_for_neighbor(single, BlockDirection::East, right),
+            single
+        );
+
+        let stone = Block::STONE.default_state.id;
+        assert_eq!(
+            copper_chest_state_for_neighbor(left, BlockDirection::East, stone),
+            left
+        );
     }
 }

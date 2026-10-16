@@ -1362,6 +1362,13 @@ impl BlockRegistry {
         state_id
     }
 
+    /// Vanilla `Block.shouldChangedStateKeepBlockEntity` on the block being placed.
+    #[must_use]
+    pub fn should_changed_state_keep_block_entity(&self, block: &Block, old_block: &Block) -> bool {
+        self.get_pumpkin_block(block.id)
+            .is_some_and(|behaviour| behaviour.should_changed_state_keep_block_entity(old_block))
+    }
+
     pub fn update_neighbors(&self, world: &Arc<World>, position: &BlockPos, flags: BlockFlags) {
         for direction in BlockDirection::abstract_block_update_order() {
             let pos = position.offset(direction.to_offset());

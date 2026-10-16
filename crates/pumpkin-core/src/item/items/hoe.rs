@@ -1,5 +1,6 @@
 use crate::block::registry::BlockActionResult;
 use crate::entity::player::Player;
+use crate::item::items::{blocking_item_use_intent, emit_block_change};
 use crate::item::{ItemBehaviour, ItemMetadata};
 use crate::server::Server;
 use pumpkin_data::BlockDirection;
@@ -8,6 +9,7 @@ use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::sound::SoundCategory;
 use pumpkin_data::{Block, tag};
 use pumpkin_util::GameMode;
+use pumpkin_util::Hand;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_world::world::BlockFlags;
@@ -21,7 +23,7 @@ impl ItemMetadata for HoeItem {
 }
 
 impl ItemBehaviour for HoeItem {
-    fn use_on_block(
+    fn use_on_block_with_hand(
         &self,
         item: &mut ItemStack,
         player: &Player,
@@ -30,9 +32,14 @@ impl ItemBehaviour for HoeItem {
         _cursor_pos: Vector3<f32>,
         block: &Block,
         _server: &Server,
+        hand: Hand,
     ) -> BlockActionResult {
         // Adventure mode clears mayBuild, so tilling does not run.
         if !player.may_build() {
+            return BlockActionResult::Pass;
+        }
+        // Main hand plus a shield in the off hand raises the shield instead of tilling.
+        if blocking_item_use_intent(player, hand) {
             return BlockActionResult::Pass;
         }
 
@@ -53,6 +60,7 @@ impl ItemBehaviour for HoeItem {
             }
 
             world.set_block_state(&location, result.new_state_id, BlockFlags::NOTIFY_ALL);
+            emit_block_change(&world, location);
 
             if let Some(loot_key) = result.entry.loot
                 && let Some(loot_table) = world.get_loot_table(loot_key)

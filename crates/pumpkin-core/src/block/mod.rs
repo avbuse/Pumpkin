@@ -164,6 +164,11 @@ pub trait BlockBehaviour: Send + Sync {
         args.state_id
     }
 
+    /// Whether replacing `old_block` with this block should keep the existing block entity.
+    fn should_changed_state_keep_block_entity(&self, _old_block: &Block) -> bool {
+        false
+    }
+
     fn on_scheduled_tick(&self, _args: OnScheduledTickArgs<'_>) {}
 
     fn on_state_replaced(&self, _args: OnStateReplacedArgs<'_>) {}

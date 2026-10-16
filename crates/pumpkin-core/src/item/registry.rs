@@ -102,6 +102,7 @@ impl ItemRegistry {
         cursor_pos: Vector3<f32>,
         block: &Block,
         server: &Server,
+        hand: pumpkin_util::Hand,
     ) -> BlockActionResult {
         let cooldown = stack.get_use_cooldown().cloned();
         let cooldown_group = cooldown
@@ -115,7 +116,9 @@ impl ItemRegistry {
 
         let pumpkin_item = self.get_pumpkin_item(stack.item.id);
         let result = pumpkin_item.map_or(BlockActionResult::Pass, |pumpkin_item| {
-            pumpkin_item.use_on_block(stack, player, location, face, cursor_pos, block, server)
+            pumpkin_item.use_on_block_with_hand(
+                stack, player, location, face, cursor_pos, block, server, hand,
+            )
         });
 
         if let Some(cooldown) = cooldown {

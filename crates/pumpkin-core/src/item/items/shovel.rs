@@ -1,5 +1,6 @@
 use crate::block::registry::BlockActionResult;
 use crate::entity::player::Player;
+use crate::item::items::{blocking_item_use_intent, emit_block_change};
 use crate::item::{ItemBehaviour, ItemMetadata};
 use crate::server::Server;
 use pumpkin_data::BlockDirection;
@@ -10,6 +11,7 @@ use pumpkin_data::sound::{Sound, SoundCategory};
 use pumpkin_data::world::WorldEvent;
 use pumpkin_data::{Block, tag};
 use pumpkin_util::GameMode;
+use pumpkin_util::Hand;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_world::world::BlockFlags;
@@ -23,7 +25,7 @@ impl ItemMetadata for ShovelItem {
 }
 
 impl ItemBehaviour for ShovelItem {
-    fn use_on_block(
+    fn use_on_block_with_hand(
         &self,
         item: &mut ItemStack,
         player: &Player,
@@ -32,6 +34,7 @@ impl ItemBehaviour for ShovelItem {
         _cursor_pos: Vector3<f32>,
         block: &Block,
         _server: &Server,
+        hand: Hand,
     ) -> BlockActionResult {
         let world = player.world();
         let get_block = |dx: i8, dy: i8, dz: i8| {
@@ -43,8 +46,11 @@ impl ItemBehaviour for ShovelItem {
         let mut damage = 1;
 
         // Path making needs mayBuild. Campfire dousing is a block interaction and
-        // still runs in adventure mode.
-        if player.may_build()
+        // still runs in adventure mode. A shield in the off hand skips only the
+        // path, because the campfire consumes the click before the item does.
+        let blocking = blocking_item_use_intent(player, hand);
+        if !blocking
+            && player.may_build()
             && let Some(result) =
                 SHOVEL.transform(block, world.get_block_state_id(&location), face, &get_block)
         {
@@ -56,6 +62,7 @@ impl ItemBehaviour for ShovelItem {
             }
 
             world.set_block_state(&location, result.new_state_id, BlockFlags::NOTIFY_ALL);
+            emit_block_change(&world, location);
             damage = result.entry.item_damage_per_use;
             changed = true;
         } else if block == &Block::CAMPFIRE || block == &Block::SOUL_CAMPFIRE {

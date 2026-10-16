@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::block::entities::block_entity_from_nbt;
 use crate::block::registry::BlockActionResult;
 use crate::entity::player::Player;
+use crate::item::items::{blocking_item_use_intent, emit_block_change};
 use crate::item::{ItemBehaviour, ItemMetadata};
 use crate::server::Server;
 use crate::world::World;
@@ -14,6 +15,7 @@ use pumpkin_data::tag::Taggable;
 use pumpkin_data::{Block, BlockDirection, BlockStateId, tag};
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_util::GameMode;
+use pumpkin_util::Hand;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_world::world::BlockFlags;
@@ -27,7 +29,7 @@ impl ItemMetadata for AxeItem {
 }
 
 impl ItemBehaviour for AxeItem {
-    fn use_on_block(
+    fn use_on_block_with_hand(
         &self,
         item: &mut ItemStack,
         player: &Player,
@@ -36,10 +38,15 @@ impl ItemBehaviour for AxeItem {
         _cursor_pos: Vector3<f32>,
         block: &Block,
         _server: &Server,
+        hand: Hand,
     ) -> BlockActionResult {
         // Adventure mode clears mayBuild. Vanilla refuses the item use unless the
         // stack has a can_place_on predicate, which Pumpkin does not evaluate yet.
         if !player.may_build() {
+            return BlockActionResult::Pass;
+        }
+        // Main hand plus a shield in the off hand raises the shield instead of stripping.
+        if blocking_item_use_intent(player, hand) {
             return BlockActionResult::Pass;
         }
 
@@ -68,23 +75,6 @@ impl ItemBehaviour for AxeItem {
             );
         } else {
             set_transformed_state(&world, location, current_state_id, result.new_state_id);
-            if result.entry.transform_type == Some(TransformType::CopperChest)
-                && let Some(neighbor_pos) = copper_chest_neighbor(location, current_state_id)
-            {
-                let (neighbor_block, neighbor_state_id) =
-                    world.get_block_and_state_id(&neighbor_pos);
-                if neighbor_block.has_tag(&tag::Block::MINECRAFT_COPPER_CHESTS) {
-                    let neighbor_new = copy_block_properties(
-                        neighbor_block,
-                        neighbor_state_id,
-                        result.target_block,
-                    );
-                    set_transformed_state(&world, neighbor_pos, neighbor_state_id, neighbor_new);
-                    if let Some(particle) = result.entry.particle {
-                        world.sync_world_event(particle, neighbor_pos, 0);
-                    }
-                }
-            }
         }
 
         if let Some(sound) = result.entry.sound {
@@ -92,6 +82,17 @@ impl ItemBehaviour for AxeItem {
         }
         if let Some(particle) = result.entry.particle {
             world.sync_world_event(particle, location, 0);
+        }
+        emit_block_change(&world, location);
+        // The other half of a double copper chest changes in the chest's neighbour
+        // update. The transformer only reports the change there.
+        if result.entry.transform_type == Some(TransformType::CopperChest)
+            && let Some(neighbor_pos) = copper_chest_neighbor(location, current_state_id)
+        {
+            emit_block_change(&world, neighbor_pos);
+            if let Some(particle) = result.entry.particle {
+                world.sync_world_event(particle, neighbor_pos, 0);
+            }
         }
 
         if player.gamemode.load() != GameMode::Creative {
@@ -141,7 +142,11 @@ fn set_transformed_state(
     old_state_id: BlockStateId,
     new_state_id: BlockStateId,
 ) {
-    let saved = if keeps_block_entity(old_state_id, new_state_id) {
+    let old_block = Block::from_state_id(old_state_id);
+    // Copper chests keep the entity in `set_block_state` and copy the other half
+    // from the neighbour update, so this change has to notify neighbours.
+    let copper_chest = old_block.has_tag(&tag::Block::MINECRAFT_COPPER_CHESTS);
+    let saved = if !copper_chest && keeps_block_entity(old_state_id, new_state_id) {
         world.get_block_entity(&position).map(|entity| {
             let mut nbt = NbtCompound::new();
             entity.write_internal(&mut nbt);
@@ -153,8 +158,8 @@ fn set_transformed_state(
 
     let mut flags = BlockFlags::NOTIFY_ALL;
     if saved.is_some() {
-        // Same block-entity type (copper chest, copper golem statue). Vanilla keeps
-        // the entity; a plain replacement drops its contents and spawns an empty one.
+        // Same block-entity type (copper golem statue). Vanilla keeps the entity;
+        // a plain replacement drops its contents and spawns an empty one.
         flags |= BlockFlags::UPDATE_KNOWN_SHAPE
             | BlockFlags::SKIP_BLOCK_ENTITY_REPLACED_CALLBACK
             | BlockFlags::SKIP_BLOCK_ADDED_CALLBACK;

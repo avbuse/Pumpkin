@@ -5130,9 +5130,19 @@ impl World {
         let new_block = Block::from_state_id(block_state_id);
         let is_new_block = old_block != new_block;
         let block_moved = flags.contains(BlockFlags::MOVED);
+        // Copper chests keep the entity when another copper chest replaces them, so a
+        // neighbour shape update does not empty the other half of a double chest.
+        let keep_block_entity = is_new_block
+            && old_block.default_state.block_entity_type != u16::MAX
+            && old_block.default_state.block_entity_type
+                == new_block.default_state.block_entity_type
+            && self
+                .block_registry
+                .should_changed_state_keep_block_entity(new_block, old_block);
 
         if is_new_block
             && old_block.default_state.block_entity_type != u16::MAX
+            && !keep_block_entity
             && let Some(entity) = self.get_block_entity(position)
         {
             if !flags.contains(BlockFlags::SKIP_BLOCK_ENTITY_REPLACED_CALLBACK) {
@@ -5152,14 +5162,17 @@ impl World {
         }
 
         if !flags.contains(BlockFlags::SKIP_BLOCK_ADDED_CALLBACK) && is_new_block {
-            self.block_registry.on_placed(
-                self,
-                new_block,
-                block_state_id,
-                position,
-                replaced_block_state_id,
-                block_moved,
-            );
+            // `placed` on a chest creates a new entity. Skip it when the old one stays.
+            if !keep_block_entity {
+                self.block_registry.on_placed(
+                    self,
+                    new_block,
+                    block_state_id,
+                    position,
+                    replaced_block_state_id,
+                    block_moved,
+                );
+            }
             let new_fluid = self.get_fluid(position);
             self.block_registry.on_placed_fluid(
                 self,

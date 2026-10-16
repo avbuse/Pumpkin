@@ -85,7 +85,10 @@ use fishing_rod::FishingRodItem;
 use glowing_ink_sac::GlowingInkSacItem;
 
 use super::registry::ItemRegistry;
+use crate::entity::EntityBase;
+use crate::entity::player::Player;
 use crate::item::items::potions::{LingeringPotionItem, PotionItem, SplashPotionItem};
+use crate::world::World;
 use arrow::ArrowItem;
 use axe::AxeItem;
 use bow::BowItem;
@@ -101,6 +104,10 @@ use ignite::fire_charge::FireChargeItem;
 use ignite::flint_and_steel::FlintAndSteelItem;
 use ink_sac::InkSacItem;
 use mace::MaceItem;
+use pumpkin_data::data_component_impl::BlocksAttacksImpl;
+use pumpkin_data::game_event::GameEvent;
+use pumpkin_util::Hand;
+use pumpkin_util::math::position::BlockPos;
 use shovel::ShovelItem;
 use snowball::SnowBallItem;
 use spear::SpearItem;
@@ -172,4 +179,57 @@ pub fn default_registry() -> Arc<ItemRegistry> {
     manager.register(DebugStickItem);
 
     Arc::new(manager)
+}
+
+/// Whether a main-hand tool use should pass so the player can raise a shield.
+///
+/// True when the use is the main hand, the off hand has `blocks_attacks`, and the player is not sneaking.
+#[must_use]
+pub const fn player_has_blocking_item_use_intent(
+    main_hand: bool,
+    off_hand_blocks_attacks: bool,
+    sneaking: bool,
+) -> bool {
+    main_hand && off_hand_blocks_attacks && !sneaking
+}
+
+#[must_use]
+pub fn blocking_item_use_intent(player: &Player, hand: Hand) -> bool {
+    player_has_blocking_item_use_intent(
+        hand == Hand::Right,
+        player
+            .inventory()
+            .off_hand_item()
+            .get_data_component::<BlocksAttacksImpl>()
+            .is_some(),
+        player.get_entity().is_sneaking(),
+    )
+}
+
+pub fn emit_block_change(world: &World, position: BlockPos) {
+    world.emit_game_event(GameEvent::BlockChange.name(), position.to_centered_f64());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::player_has_blocking_item_use_intent;
+    use pumpkin_data::data_component_impl::BlocksAttacksImpl;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+
+    #[test]
+    fn shield_in_the_off_hand_passes_a_main_hand_tool_use() {
+        assert!(player_has_blocking_item_use_intent(true, true, false));
+        assert!(!player_has_blocking_item_use_intent(true, true, true));
+        assert!(!player_has_blocking_item_use_intent(false, true, false));
+        assert!(!player_has_blocking_item_use_intent(true, false, false));
+    }
+
+    #[test]
+    fn shield_stack_has_blocks_attacks() {
+        let shield = ItemStack::new(1, &Item::SHIELD);
+        assert!(shield.get_data_component::<BlocksAttacksImpl>().is_some());
+        let stick = ItemStack::new(1, &Item::STICK);
+        assert!(stick.get_data_component::<BlocksAttacksImpl>().is_none());
+    }
 }

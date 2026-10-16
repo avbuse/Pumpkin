@@ -261,6 +261,7 @@ impl BedrockClient {
                             data.click_position,
                             block,
                             &server,
+                            pumpkin_util::Hand::Right,
                         );
 
                         if should_try_block_placement(&item_result) {
