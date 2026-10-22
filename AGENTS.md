@@ -240,3 +240,14 @@ If the change has no in-game effect (tooling, codecs, config, refactors), say th
         ```
 
         Use the operator's GitHub username for the mention, so maintainers can reach them. If you don't know it, ask for it instead of guessing. Add "and reviewed by @<username>" only if the operator told you they reviewed it. Add that they tested it in-game only if they told you they did. Never state a human review, play test or capture that didn't happen.
+
+## Engineering handbook (avbuse fork)
+
+This block is specific to the `avbuse/Pumpkin` fork. When syncing from upstream, keep it as the last section of this file.
+
+Shared engineering standards are vendored in `docs/engineering-handbook/` (version in `HANDBOOK_VERSION`). Everything above this block still applies, including its build, check and vanilla-parity rules. Where the handbook and upstream guidance differ, upstream guidance wins and the difference is recorded here.
+
+- Our repository: `avbuse/Pumpkin`. Default branch: `master`. Parent `Pumpkin-MC/Pumpkin` is **read-only**: fetch and compare only.
+- Push and open pull requests only in `avbuse/Pumpkin`, always with `gh pr create --repo avbuse/Pumpkin --base master --head <branch>`. Never push to, or open a pull request against, `Pumpkin-MC/Pumpkin` without the owner's explicit authorisation for that specific contribution.
+- **Recorded exception to "Agents never open pull requests" (Pull requests section above):** that rule is read as governing contributions to `Pumpkin-MC/Pumpkin`. In this fork the owner requires agents to open pull requests into `avbuse/Pumpkin` for review. The exception covers our fork only. Agents still never merge or deploy.
+- Upstream syncs follow `docs/engineering-handbook/standards/09-fork-and-upstream-policy.md`: conflicts stop the sync and are reported; never force-push or overwrite the fork.
