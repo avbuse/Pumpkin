@@ -1,0 +1,14 @@
+---
+description: Engineering handbook and fork policy
+alwaysApply: true
+---
+
+Read `AGENTS.md` and `docs/engineering-handbook/` before changing anything.
+
+- Push and open pull requests only to this project's own repository, with
+  `gh pr create --repo OWNER/REPO --base BASE --head BRANCH` (values from `AGENTS.md`).
+- Never push to, or open a pull request against, the parent repository.
+- Never commit to the default branch, force-push, merge or deploy.
+- Never print or commit secrets.
+- Run the required checks in `AGENTS.md` and report results, including anything not run.
+- Stay inside the owned files and scope given in your assignment.

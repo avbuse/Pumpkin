@@ -1,0 +1,35 @@
+<!-- Copy to AGENTS.md. For an existing file, append only the "Engineering handbook" block. -->
+# {{PROJECT_NAME}} — agent instructions
+
+## Project
+- Purpose / users / outcomes: {{...}}
+- Paperclip project: {{...}}
+- Stack and architectural constraints: {{...}}
+
+## Repository
+- Our repository: `{{OWNER/REPO}}`
+- Parent repository (if forked): `{{PARENT_OWNER/REPO or "none"}}` — read-only
+- Default branch: `{{BRANCH}}`  ·  Upstream sync branch: `{{BRANCH or "n/a"}}`
+
+## Commands
+- Setup: `{{...}}`
+- Build: `{{...}}`
+- Test / required checks before handoff: `{{...}}`
+- Run: `{{...}}`
+
+## Engineering handbook
+Handbook version: see `HANDBOOK_VERSION`. Standards are vendored in `docs/engineering-handbook/`.
+Read them before starting work. The project-specific rules above and any exceptions below take
+precedence over the handbook.
+
+Non-negotiable:
+- Push and open PRs only to `{{OWNER/REPO}}`, always with
+  `gh pr create --repo {{OWNER/REPO}} --base {{BRANCH}} --head <branch>`. Verify the destination
+  first. Never push to or open a PR against the parent repository without the human owner's explicit
+  authorisation for that contribution. Treat upstream remotes as read-only.
+- Never commit to `{{BRANCH}}`. Never force-push. Never merge or deploy; the human owner does that.
+- Never commit, print or paste secrets.
+- Report results honestly: implemented, tested, reviewed, merged and deployed are different things.
+
+## Exceptions
+{{List each justified exception, its scope, and why. "None" if none.}}
